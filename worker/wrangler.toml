@@ -43,6 +43,15 @@ crons = [
   "50,55 22 * * *",          # 10) am summary 起手（台北 06:50/06:55；dow * + 程式守門）
   "*/5 23 * * *",            # 11) am summary 主窗（台北 07:00-07:55；morning 常態 07:1x 落地）
   "*/10 0 * * *",            # 12) am summary 尾窗（台北 08:00-08:50；morning 遲到仍趕 09:00 前）
+  # 13-17) recheck 班（2026-07-25）：單發班的「dispatch 成功 ≠ job 成功」補課。
+  #   主觸發後 T+25~50 分再檢查一次產物；仍非今日 → 補發第 2 次並告警（bkGate，上限 2 次）。
+  #   全部排在該班 GH 兜底 cron 之前。與哨兵 cron（*/5 9-14）同分醒的兩條各帶自己的
+  #   event.cron，dispatchRoleForCron 先攔截，互不干擾（同既有設計）。
+  "5 6 * * 1-5",             # 13) daysummary recheck（台北 14:05）
+  "10 7 * * 1-5",            # 14) intraday recheck（台北 15:10）
+  "0 11 * * 1-5",            # 15) aetf recheck（台北 19:00）
+  "55 12 * * 1-5",           # 16) baseline recheck（台北 20:55；等腳本自帶 10 分×4 重試跑完才判）
+  "35 21 * * *",             # 17) us recheck（台北 05:35；dow * + 程式守門）
 ]
 
 [[kv_namespaces]]

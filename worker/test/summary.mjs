@@ -182,7 +182,11 @@ const diag = pipes.find((p) => p.name === "diag");
   const getP = (u) => mkFetch(byUrl, spy)(u).then((r) => (r.ok ? r.json() : null));
   const out = await runChain({ ...ENV_BASE, GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, diag, getP, mkFetch(byUrl, spy));
   chk("chain 上游備 → fired diag", out.fired === true && spy.some((s) => s.url.includes("/diag.yml/dispatches")));
-  chk("chain KV 記 bkfired:diag", kv._m.get("bkfired:20260721:diag") === "fired");
+  // 2026-07-25：值改為 JSON 狀態 {s,ts,n}（dispatch 成功 ≠ job 成功，見 src bkGate）
+  chk("chain KV 記 bkfired:diag（fired/第1次）", (() => {
+    const st = JSON.parse(kv._m.get("bkfired:20260721:diag"));
+    return st.s === "fired" && st.n === 1 && st.ts > 0;
+  })(), kv._m.get("bkfired:20260721:diag"));
 }
 {
   // runChain：上游未備 → waiting、不 dispatch

@@ -1,9 +1,27 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-20（Worker 排程備援上線：6 條每日班準點檢查產物新鮮度、GH 排程延遲/漏發時補發 dispatch）
+最後更新：2026-07-25（排程可靠度補強：dispatch 成功 ≠ job 成功 → bkGate recheck ＋ 排程失敗告警接 LINE）
 
 ## 快速接手
 
+- **排程可靠度補強（2026-07-25，deploy version `9c8a64a6`）**：修掉「dispatch 回 204 就寫
+  `bkfired`、之後一律短路」的盲點——首發的 GH run 若自己失敗、產物沒更新，Worker 當日不再補救
+  （五條單發班各只有一條主 cron ＝ Worker 端零重試，只剩 GH 兜底一次）。三處改動：
+  ① KV `bkfired` 值升級為 JSON `{s,ts,n}`（`parseBkState`／`bkGate`／`bkStateValue`，
+  `worker/src/index.js:773` 起），舊純字串相容（視為 ts=0、n=1）；② CF cron 12→**17 條**，
+  五單發班各加一條 recheck（daysummary 14:05／intraday 15:10／aetf 19:00／baseline 20:55
+  ——等腳本自帶 10 分×4 重試跑完才判／us 05:35），冷卻 20 分後產物仍非今日 → 補發第 2 次，
+  上限 `BK_MAX_ATTEMPTS=2` 後不再發（留給 GH 兜底）；③ 既有 `sendAlert` 三通道接到排程失敗
+  路徑（`alertJob`，每日每 tag 至多一則，KV `alerted:<date>:<tag>`）：backup／chain dispatch
+  失敗、recheck 補發、summary dispatch 失敗、aetf2 失敗。**目前實際通道＝LINE**
+  （secrets 只有 LINE_TOKEN＋LINE_USER_ID，無 ALERT_WEBHOOK）。
+  **刻意不動**：summary 的冪等維持「當日單發」不套 recheck——帶 LLM 花費，重發風險 > 漏發風險。
+  **已知限制**：告警由 Worker 自己發，Worker 整個掛掉時發不出（真正獨立的路徑要在各 GH workflow
+  加 `if: failure()` 的通知 step，尚未做）；`max-attempts` 之後產物仍沒落地不會再告警一次
+  （日終健檢尚未做，屬下一步 P1）。**驗證**：worker 全測試綠（backup.mjs 99／summary.mjs 64；
+  parity.mjs 31 失敗為既有 live.json/lastweek.json 參考檔漂移，與此次無關），部署後 17 條 cron
+  全數註冊成功、`/backup?name=X&dry=1` 正常回應。**recheck 路徑的實戰首驗要等下個交易日
+  （2026-07-27 週一）**——07-25 為週六，所有 TW 班都被 non-trading-day 守門擋掉。
 - **Worker 升格全系統主排程（2026-07-22，deploy version `485a7717`，commit `689f7ff`）**：
   治 GH cron 常態延遲 60-90 分。CF cron 9→12 條：summary am/pm 事件驅動（上游全齊即 dispatch
   postmkt/summary.yml 帶 inputs.slot；pm 三源＝flows+postmkt+news晚班、am＝morning.json）、

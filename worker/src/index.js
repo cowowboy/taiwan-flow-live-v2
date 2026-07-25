@@ -750,6 +750,15 @@ export const BACKUP_CRONS = {
   // us 主觸發 05:05 台北 = 21:05 UTC 前一日；CF cron 拒收 dow 0-4（code 10100），改用 dow *、
   // 週末守門移到 runBackup 內用台北 dow（21:05 UTC 只在台北一~五晨落在平日）：
   "5 21 * * *":    "us",           // 台北 05:05 主觸發（GH 備援 06:10）；weekend 由 runBackup dow 守門
+  // recheck 班（2026-07-25）：主觸發後 T+25~50 分再看一次產物。首發的 GH run 若自己失敗，
+  // 舊版靠 bkfired 短路等於當日不再管；現在 bkGate 冷卻期過→產物仍非今日就補發第 2 次並告警。
+  // 時點都排在該班 GH 兜底 cron 之前（補發還來得及，來不及才輪到 GH）。
+  "5 6 * * 1-5":   "daysummary",   // 台北 14:05（首發 13:35＋30 分；GH 兜底 14:35）
+  "10 7 * * 1-5":  "intraday",     // 台北 15:10（首發 14:40＋30 分）
+  "0 11 * * 1-5":  "aetf",         // 台北 19:00（首發 18:35＋25 分；GH 兜底 19:05）
+  "55 12 * * 1-5": "baseline",     // 台北 20:55（首發 20:05＋50 分——baseline 腳本自帶 10 分×4 重試，
+                                   //   等它跑完才判失敗，否則誤判重發；GH 兜底 21:15）
+  "35 21 * * *":   "us",           // 台北 05:35（首發 05:05＋30 分；GH 兜底 06:10）；weekend 同樣由 dow 守門
 };
 // 非單體班的排程角色（cron 字串 → 角色；晚場協調班／am summary 輪詢窗）
 export const DISPATCH_ROLES = {
@@ -772,6 +781,37 @@ export function backupPipelineForCron(cron, env) {
 }
 export const BKFIRED_TTL = 172800;   // 2 天（同 sentinel/frame）
 export const bkfiredKey = (dateISO, name) => `bkfired:${dateISO.replaceAll("-", "")}:${name}`;
+// ---- 冪等狀態升級（2026-07-25）：dispatch 成功 ≠ job 成功 ----
+// 舊版 dispatch 回 204 就寫 `fired`，之後同班一律 already-fired 短路——若那個 GH run
+// 自己失敗、產物根本沒更新，Worker 當日不再補救，只剩 GH 兜底 cron 一次機會（單發班
+// daysummary/intraday/aetf/baseline/us 各只有一條主 cron，等於 Worker 端零重試）。
+// 改法：值改存 JSON `{s,ts,n}`（s=fired|produced、ts=寫入時刻、n=已 dispatch 次數），
+// 各單發班另加一條 T+25~50 分的 recheck cron；recheck 時若產物仍非今日 → 補發第 2 次
+// 並告警，落地了則標 produced 當日短路。上限 BK_MAX_ATTEMPTS 次後不再發（留給 GH 兜底）。
+// 向後相容：讀到舊格式純字串（"fired"/"produced"）視為 ts=0、n=1——ts=0 代表冷卻已過，
+// 部署當日既有的 fired 鍵仍能被 recheck 檢查（且仍受產物新鮮度守門，不會亂發）。
+export const BK_RECHECK_MS = 20 * 60e3;   // 首發後至少隔這麼久才重檢（各 recheck cron 實排 25-50 分）
+export const BK_MAX_ATTEMPTS = 2;         // 每班每日至多 dispatch 次數（首發＋補發一次）
+export function parseBkState(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "object") return { s: raw.s || "fired", ts: raw.ts || 0, n: raw.n || 1 };
+  const t = String(raw);
+  if (t.startsWith("{")) {
+    try { const o = JSON.parse(t); return { s: o.s || "fired", ts: o.ts || 0, n: o.n || 1 }; }
+    catch { /* 壞 JSON → 當舊格式處理 */ }
+  }
+  return { s: t, ts: 0, n: 1 };   // 舊格式
+}
+export const bkStateValue = (s, n, nowMs = Date.now()) => JSON.stringify({ s, ts: nowMs, n });
+// 冪等閘門（純函式，可離線測）：null=首次可發；produced=當日已落地，永不再發；
+// fired 則看次數上限與冷卻期——冷卻未過照舊短路，過了才進 recheck（仍要過新鮮度才補發）。
+export function bkGate(st, nowMs, recheckMs = BK_RECHECK_MS, maxN = BK_MAX_ATTEMPTS) {
+  if (!st) return { act: "go", n: 1 };
+  if (st.s === "produced") return { act: "skip", why: "already-produced", n: st.n };
+  if (st.n >= maxN) return { act: "skip", why: "max-attempts", n: st.n };
+  if (nowMs - (st.ts || 0) < recheckMs) return { act: "skip", why: "already-fired", n: st.n };
+  return { act: "recheck", n: st.n + 1 };
+}
 // 產物新鮮度判定（純函式，可離線測）：fresh=true 代表今日已跑、不需補發
 export function productFresh(obj, pipe, today) {
   if (!obj) return false;
@@ -805,23 +845,36 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
     return { name: pipe.name, skipped: "non-trading-day" };
   }
   const key = bkfiredKey(today, pipe.name);
-  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: pipe.name, skipped: "already-fired" };   // 冪等
+  const st = env.FLOW_KV ? parseBkState(await env.FLOW_KV.get(key)) : null;
+  const gate = bkGate(st, opts.nowMs || Date.now());   // 冪等＋冷卻＋次數上限（nowMs 供測試注入）
+  if (gate.act === "skip") return { name: pipe.name, skipped: gate.why, attempts: gate.n };
   let obj = null, fetchErr = null;
   // {date} 佔位：intraday 產物按日命名（data/intraday/YYYY-MM-DD.json），代入今日；
   // 當日檔 404 → obj=null → 不新鮮 → 補發，語意與固定 URL 班一致
   try { obj = await fetchProduct(pipe.url.replace("{date}", today), fetchFn); }
   catch (e) { fetchErr = String((e && e.message) || e); }
   const productDate = obj ? String(obj[pipe.field] || "") : null;
-  if (productFresh(obj, pipe, today)) return { name: pipe.name, fresh: true, productDate };   // 原班已跑 → 不發
-  if (opts.dry) return { name: pipe.name, fresh: false, wouldDispatch: true, productDate, today, fetchErr };
+  if (productFresh(obj, pipe, today)) {
+    // recheck 輪確認落地成功 → 標 produced，當日剩餘喚醒直接短路（省一次產物抓取）
+    if (gate.act === "recheck" && env.FLOW_KV)
+      await env.FLOW_KV.put(key, bkStateValue("produced", gate.n - 1), { expirationTtl: BKFIRED_TTL });
+    return { name: pipe.name, fresh: true, productDate, recheck: gate.act === "recheck" || undefined };
+  }
+  if (opts.dry) return { name: pipe.name, fresh: false, wouldDispatch: true, attempt: gate.n, productDate, today, fetchErr };
   try {
     await ghDispatchWithRetry(env, pipe.repo, pipe.wf, fetchFn, opts.sleepFn || sleep);
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "fired", { expirationTtl: BKFIRED_TTL });
-    console.log(`backup: ${pipe.name} 產物非今日(${productDate}) → dispatched ${pipe.repo}/${pipe.wf}`);
-    return { name: pipe.name, fired: true, productDate };
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n), { expirationTtl: BKFIRED_TTL });
+    console.log(`backup: ${pipe.name} 產物非今日(${productDate}) → dispatched ${pipe.repo}/${pipe.wf}（第 ${gate.n} 次）`);
+    // 第 2 次才告警：代表首發那輪的 GH run 沒把產物做出來（dispatch 成功 ≠ job 成功）
+    if (gate.act === "recheck")
+      await alertJob(env, tp, `bk-recheck-${pipe.name}`,
+        `⚠️ ${pipe.name}：首發後產物仍非今日（${productDate || "無檔"}），已補發第 ${gate.n} 次；仍失敗則等 GH 兜底 cron`, fetchFn);
+    return { name: pipe.name, fired: true, attempt: gate.n, productDate };
   } catch (e) {
-    // dispatch 兩次都失敗 → log 後放棄該班（KV 不記，理論上明日同班 cron 再檢查；當日 aetf 另有 runEvening aetf2 二段兜底）
+    // dispatch 兩次都失敗 → 告警＋log 後放棄該班（KV 不記，recheck cron 或 GH 兜底 cron 再接手）
     console.log(`backup dispatch ${pipe.name}:`, e && e.message);
+    await alertJob(env, tp, `bk-err-${pipe.name}`,
+      `❌ ${pipe.name} dispatch 失敗：${String((e && e.message) || e)}（GH 兜底 cron 仍會跑）`, fetchFn);
     return { name: pipe.name, error: String((e && e.message) || e), productDate };
   }
 }
@@ -912,6 +965,10 @@ export async function runSummaryDispatch(env, tp, slot, fetchFn = fetch, opts = 
     return { slot, fired: true };
   } catch (e) {
     console.log(`summary dispatch ${slot}:`, e && e.message);   // KV 不記 → 下輪自動重試
+    // 注意：summary 帶 LLM 花費，冪等維持「當日單發」不套 bkGate recheck（重發風險 > 漏發風險，
+    // 且 GH 兜底 cron＋build_summary.py 已產出守門仍在）；這裡只補「失敗有人知道」。
+    await alertJob(env, tp, `sum-err-${slot}`,
+      `❌ summary(${slot}) dispatch 失敗：${String((e && e.message) || e)}（GH 兜底 cron 仍會跑）`, fetchFn);
     return { slot, error: String((e && e.message) || e) };
   }
 }
@@ -927,23 +984,30 @@ export function chainStep(pipe, depObj, selfObj, today) {
 export async function runChain(env, tp, pipe, getP, fetchFn = fetch, opts = {}) {
   const today = tp.date;
   const key = bkfiredKey(today, pipe.name);
-  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: pipe.name, skipped: "already-fired" };
+  const st = env.FLOW_KV ? parseBkState(await env.FLOW_KV.get(key)) : null;
+  const gate = bkGate(st, opts.nowMs || Date.now());   // 同 runBackup：冷卻過了才 recheck
+  if (gate.act === "skip") return { name: pipe.name, skipped: gate.why, attempts: gate.n };
   const selfObj = await getP(pipe.url.replace("{date}", today));
   const depObj = await getP(pipe.dep.url);
   const step = chainStep(pipe, depObj, selfObj, today);
   if (step.action === "fresh") {
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "produced", { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("produced", gate.act === "recheck" ? gate.n - 1 : 0), { expirationTtl: BKFIRED_TTL });
     return { name: pipe.name, fresh: true };
   }
   if (step.action === "wait-dep") return { name: pipe.name, waiting: "dep", depDate: step.depDate };
-  if (opts.dry) return { name: pipe.name, wouldDispatch: true };
+  if (opts.dry) return { name: pipe.name, wouldDispatch: true, attempt: gate.n };
   try {
     await ghDispatchWithRetry(env, pipe.repo, pipe.wf, fetchFn, opts.sleepFn || sleep);
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "fired", { expirationTtl: BKFIRED_TTL });
-    console.log(`chain: ${pipe.name} 上游今日已備 → dispatched ${pipe.repo}/${pipe.wf}`);
-    return { name: pipe.name, fired: true };
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n), { expirationTtl: BKFIRED_TTL });
+    console.log(`chain: ${pipe.name} 上游今日已備 → dispatched ${pipe.repo}/${pipe.wf}（第 ${gate.n} 次）`);
+    if (gate.act === "recheck")
+      await alertJob(env, tp, `bk-recheck-${pipe.name}`,
+        `⚠️ ${pipe.name}：首發後產物仍非今日，已補發第 ${gate.n} 次；仍失敗則等 GH 兜底 cron`, fetchFn);
+    return { name: pipe.name, fired: true, attempt: gate.n };
   } catch (e) {
     console.log(`chain dispatch ${pipe.name}:`, e && e.message);
+    await alertJob(env, tp, `bk-err-${pipe.name}`,
+      `❌ ${pipe.name} dispatch 失敗：${String((e && e.message) || e)}（GH 兜底 cron 仍會跑）`, fetchFn);
     return { name: pipe.name, error: String((e && e.message) || e) };
   }
 }
@@ -963,6 +1027,8 @@ export async function runAetf2(env, tp, fetchFn = fetch, opts = {}) {
     return { name: "aetf2", fired: true };
   } catch (e) {
     console.log("aetf2 dispatch:", e && e.message);
+    await alertJob(env, tp, "bk-err-aetf2",
+      `❌ aetf 二段 dispatch 失敗：${String((e && e.message) || e)}`, fetchFn);
     return { name: "aetf2", error: String((e && e.message) || e) };
   }
 }
@@ -1111,6 +1177,26 @@ export async function sendAlert(env, text, fetchFn = fetch) {
   const out = { sent: ok.length > 0, channels: ok };
   if (errs.length) out.errors = errs;
   return out;
+}
+// ---- 排程告警（2026-07-25）：沿用上面第九期三通道，接到「排程失敗」路徑 ----
+// 原本 sendAlert 只服務盤中價格事件，排程班別失敗全靠 console.log——Worker 日誌不持久，
+// 等於沒人在看（07-16/17 斷檔兩天無人知的同型問題）。這裡把它接到 dispatch 失敗與
+// recheck 補發兩個路徑上。防噪：每日每 tag 至多一則（KV alerted:<date>:<tag>），
+// 因為 runChain/runEvening 是每 5 分輪詢，同一個故障一晚會撞上 30+ 次。
+// 通道未設 → sendAlert 回 {sent:false} 靜默，不打任何外部請求（不影響既有行為）。
+export const ALERTED_TTL = 172800;
+export const alertedKey = (dateISO, tag) => `alerted:${dateISO.replaceAll("-", "")}:${tag}`;
+export async function alertJob(env, tp, tag, text, fetchFn = fetch) {
+  try {
+    const key = alertedKey(tp.date, tag);
+    if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { skipped: "already-alerted" };
+    const res = await sendAlert(env, `【排程】${text}`, fetchFn);
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, "1", { expirationTtl: ALERTED_TTL });
+    return res;
+  } catch (e) {   // 告警自己失敗絕不能拖垮排程主體
+    console.log("alertJob:", e && e.message);
+    return { error: String((e && e.message) || e) };
+  }
 }
 // /line/webhook：LINE 平台事件進來時擷取 source.userId 存 KV（單 key line:uid，變化才寫）。
 // 僅用於「一次性取 userId」設定 LINE_USER_ID；不驗 x-line-signature（簽章需 channel secret，
