@@ -52,7 +52,19 @@ crons = [
   "0 11 * * 1-5",            # 15) aetf recheck（台北 19:00）
   "55 12 * * 1-5",           # 16) baseline recheck（台北 20:55；等腳本自帶 10 分×4 重試跑完才判）
   "35 21 * * *",             # 17) us recheck（台北 05:35；dow * + 程式守門）
+  # 18-19) 健檢班（2026-07-25 P1）：不 dispatch、不補跑，只盤點當日該有的產物是否落地，
+  #   缺件走 alertJob 告警（每日每 slot 至多一則）。補 recheck 管不到的洞：達重試上限、
+  #   以及哨兵/事件驅動類管線（flows/postmkt/news/summary）本來就沒有 recheck。
+  "50 15 * * 1-5",           # 18) 日終健檢（台北 23:50，晚場班窗尾聲、GH 兜底 cron 全過）
+  "30 1 * * 1-5",            # 19) 晨間健檢（台北 09:30，morning/us/summary-am 窗口全過）
 ]
+
+# Workers Logs（2026-07-25）：原本 console.log 不落地，事後根本查不到「這班 cron 到底有沒有被叫起來」
+# ——2026-07-24 整天沒有任何 frame/series（KV 只剩 4 個 key）就是查不出根因的實例。開啟後可用
+# `npx wrangler tail` 即時看，dashboard 亦保留近幾日 invocation 紀錄（含 scheduled 事件成敗）。
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "FLOW_KV"

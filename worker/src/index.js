@@ -767,10 +767,18 @@ export const DISPATCH_ROLES = {
   "*/5 23 * * *":      "summary-am",   // 台北 07:00–07:55 主窗（morning 常態 07:1x 落地）
   "*/10 0 * * *":      "summary-am",   // 台北 08:00–08:50 尾窗兜底（morning 遲到仍趕 09:00 前）
 };
+// 健檢班（2026-07-25 P1）：不 dispatch 任何東西，只「盤點當日該有的產物有沒有落地」→ 缺就告警。
+// 補的是 recheck 之後的最後一個洞：達 BK_MAX_ATTEMPTS 上限、或某條管線根本不在 Worker 管轄
+// （flows/postmkt/news 走哨兵事件驅動、summary 走事件驅動）時，失敗一樣沒人知道。
+export const HEALTH_CRONS = {
+  "50 15 * * 1-5": "eve",    // 台北 23:50——晚場協調班窗（-23:55）尾聲，所有 GH 兜底 cron（-22:55）也都過了
+  "30 1 * * 1-5":  "morn",   // 台北 09:30——morning/us/summary-am 全部窗口（-08:50）之後
+};
 // 統一路由（scheduled handler 最先判，先於 scheduledRole——晚場/am 窗的台北時刻落在
 // 哨兵窗（17-23 時 %5 分）與 :47/:07 分流範圍，不先攔截會誤入 sentinel/news/idle）
 export function dispatchRoleForCron(cron) {
   if (BACKUP_CRONS[cron]) return { kind: "backup", name: BACKUP_CRONS[cron] };
+  if (HEALTH_CRONS[cron]) return { kind: "health", slot: HEALTH_CRONS[cron] };
   const role = DISPATCH_ROLES[cron];
   return role ? { kind: role } : null;
 }
@@ -845,8 +853,9 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
     return { name: pipe.name, skipped: "non-trading-day" };
   }
   const key = bkfiredKey(today, pipe.name);
+  const now = opts.nowMs || Date.now();   // 判定與寫入用同一個時鐘（nowMs 供測試注入）
   const st = env.FLOW_KV ? parseBkState(await env.FLOW_KV.get(key)) : null;
-  const gate = bkGate(st, opts.nowMs || Date.now());   // 冪等＋冷卻＋次數上限（nowMs 供測試注入）
+  const gate = bkGate(st, now);           // 冪等＋冷卻＋次數上限
   if (gate.act === "skip") return { name: pipe.name, skipped: gate.why, attempts: gate.n };
   let obj = null, fetchErr = null;
   // {date} 佔位：intraday 產物按日命名（data/intraday/YYYY-MM-DD.json），代入今日；
@@ -857,14 +866,16 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
   if (productFresh(obj, pipe, today)) {
     // recheck 輪確認落地成功 → 標 produced，當日剩餘喚醒直接短路（省一次產物抓取）
     if (gate.act === "recheck" && env.FLOW_KV)
-      await env.FLOW_KV.put(key, bkStateValue("produced", gate.n - 1), { expirationTtl: BKFIRED_TTL });
+      await env.FLOW_KV.put(key, bkStateValue("produced", gate.n - 1, now), { expirationTtl: BKFIRED_TTL });
+    if (!opts.dry) await recordJob(env, tp, pipe.name, gate.act === "recheck" ? "landed" : "fresh", productDate);
     return { name: pipe.name, fresh: true, productDate, recheck: gate.act === "recheck" || undefined };
   }
   if (opts.dry) return { name: pipe.name, fresh: false, wouldDispatch: true, attempt: gate.n, productDate, today, fetchErr };
   try {
     await ghDispatchWithRetry(env, pipe.repo, pipe.wf, fetchFn, opts.sleepFn || sleep);
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n), { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n, now), { expirationTtl: BKFIRED_TTL });
     console.log(`backup: ${pipe.name} 產物非今日(${productDate}) → dispatched ${pipe.repo}/${pipe.wf}（第 ${gate.n} 次）`);
+    await recordJob(env, tp, pipe.name, `fired#${gate.n}`, productDate);
     // 第 2 次才告警：代表首發那輪的 GH run 沒把產物做出來（dispatch 成功 ≠ job 成功）
     if (gate.act === "recheck")
       await alertJob(env, tp, `bk-recheck-${pipe.name}`,
@@ -873,6 +884,7 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
   } catch (e) {
     // dispatch 兩次都失敗 → 告警＋log 後放棄該班（KV 不記，recheck cron 或 GH 兜底 cron 再接手）
     console.log(`backup dispatch ${pipe.name}:`, e && e.message);
+    await recordJob(env, tp, pipe.name, "error", String((e && e.message) || e));
     await alertJob(env, tp, `bk-err-${pipe.name}`,
       `❌ ${pipe.name} dispatch 失敗：${String((e && e.message) || e)}（GH 兜底 cron 仍會跑）`, fetchFn);
     return { name: pipe.name, error: String((e && e.message) || e), productDate };
@@ -948,7 +960,8 @@ export async function runSummaryDispatch(env, tp, slot, fetchFn = fetch, opts = 
   // 產物防重：本場當日檔已在線上（GH cron 或手動先跑了）→ 補記 KV 後跳過，防重複 LLM 花費
   const prodUrl = `${POSTMKT_BASE}/data/summary/${today.replaceAll("-", "")}-${slot}.json`;
   if (await getP(prodUrl)) {
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "produced", { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("produced", 0), { expirationTtl: BKFIRED_TTL });
+    if (!opts.dry) await recordJob(env, tp, `summary-${slot}`, "produced");
     return { slot, skipped: "already-produced" };
   }
   const S = summarySources(env);
@@ -960,11 +973,13 @@ export async function runSummaryDispatch(env, tp, slot, fetchFn = fetch, opts = 
   if (opts.dry) return { slot, wouldDispatch: true };
   try {
     await ghDispatchWithRetry(env, SUMMARY_REPO, SUMMARY_WF, fetchFn, opts.sleepFn || sleep, { slot });
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "fired", { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", 1), { expirationTtl: BKFIRED_TTL });
     console.log(`summary: ${slot} 上游全齊 → dispatched ${SUMMARY_REPO}/${SUMMARY_WF} slot=${slot}`);
+    await recordJob(env, tp, `summary-${slot}`, "fired");
     return { slot, fired: true };
   } catch (e) {
     console.log(`summary dispatch ${slot}:`, e && e.message);   // KV 不記 → 下輪自動重試
+    await recordJob(env, tp, `summary-${slot}`, "error", String((e && e.message) || e));
     // 注意：summary 帶 LLM 花費，冪等維持「當日單發」不套 bkGate recheck（重發風險 > 漏發風險，
     // 且 GH 兜底 cron＋build_summary.py 已產出守門仍在）；這裡只補「失敗有人知道」。
     await alertJob(env, tp, `sum-err-${slot}`,
@@ -984,28 +999,32 @@ export function chainStep(pipe, depObj, selfObj, today) {
 export async function runChain(env, tp, pipe, getP, fetchFn = fetch, opts = {}) {
   const today = tp.date;
   const key = bkfiredKey(today, pipe.name);
+  const now = opts.nowMs || Date.now();                // 判定與寫入用同一個時鐘
   const st = env.FLOW_KV ? parseBkState(await env.FLOW_KV.get(key)) : null;
-  const gate = bkGate(st, opts.nowMs || Date.now());   // 同 runBackup：冷卻過了才 recheck
+  const gate = bkGate(st, now);                        // 同 runBackup：冷卻過了才 recheck
   if (gate.act === "skip") return { name: pipe.name, skipped: gate.why, attempts: gate.n };
   const selfObj = await getP(pipe.url.replace("{date}", today));
   const depObj = await getP(pipe.dep.url);
   const step = chainStep(pipe, depObj, selfObj, today);
   if (step.action === "fresh") {
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("produced", gate.act === "recheck" ? gate.n - 1 : 0), { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("produced", gate.act === "recheck" ? gate.n - 1 : 0, now), { expirationTtl: BKFIRED_TTL });
+    if (!opts.dry) await recordJob(env, tp, pipe.name, gate.act === "recheck" ? "landed" : "fresh");
     return { name: pipe.name, fresh: true };
   }
   if (step.action === "wait-dep") return { name: pipe.name, waiting: "dep", depDate: step.depDate };
   if (opts.dry) return { name: pipe.name, wouldDispatch: true, attempt: gate.n };
   try {
     await ghDispatchWithRetry(env, pipe.repo, pipe.wf, fetchFn, opts.sleepFn || sleep);
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n), { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", gate.n, now), { expirationTtl: BKFIRED_TTL });
     console.log(`chain: ${pipe.name} 上游今日已備 → dispatched ${pipe.repo}/${pipe.wf}（第 ${gate.n} 次）`);
+    await recordJob(env, tp, pipe.name, `fired#${gate.n}`);
     if (gate.act === "recheck")
       await alertJob(env, tp, `bk-recheck-${pipe.name}`,
         `⚠️ ${pipe.name}：首發後產物仍非今日，已補發第 ${gate.n} 次；仍失敗則等 GH 兜底 cron`, fetchFn);
     return { name: pipe.name, fired: true, attempt: gate.n };
   } catch (e) {
     console.log(`chain dispatch ${pipe.name}:`, e && e.message);
+    await recordJob(env, tp, pipe.name, "error", String((e && e.message) || e));
     await alertJob(env, tp, `bk-err-${pipe.name}`,
       `❌ ${pipe.name} dispatch 失敗：${String((e && e.message) || e)}（GH 兜底 cron 仍會跑）`, fetchFn);
     return { name: pipe.name, error: String((e && e.message) || e) };
@@ -1022,11 +1041,13 @@ export async function runAetf2(env, tp, fetchFn = fetch, opts = {}) {
   if (opts.dry) return { name: "aetf2", wouldDispatch: true };
   try {
     await ghDispatchWithRetry(env, "taiwan-flow-live-v2", "aetf.yml", fetchFn, opts.sleepFn || sleep);
-    if (env.FLOW_KV) await env.FLOW_KV.put(key, "fired", { expirationTtl: BKFIRED_TTL });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", 1), { expirationTtl: BKFIRED_TTL });
     console.log("aetf2: 二段補抓 dispatched");
+    await recordJob(env, tp, "aetf2", "fired");
     return { name: "aetf2", fired: true };
   } catch (e) {
     console.log("aetf2 dispatch:", e && e.message);
+    await recordJob(env, tp, "aetf2", "error", String((e && e.message) || e));
     await alertJob(env, tp, "bk-err-aetf2",
       `❌ aetf 二段 dispatch 失敗：${String((e && e.message) || e)}`, fetchFn);
     return { name: "aetf2", error: String((e && e.message) || e) };
@@ -1052,6 +1073,98 @@ export async function runEvening(env, tp, fetchFn = fetch, opts = {}) {
   }
   try { out.aetf2 = await runAetf2(env, tp, fetchFn, opts); }
   catch (e) { out.aetf2 = { error: String((e && e.message) || e) }; }
+  return out;
+}
+
+// ---- 排程狀態軌跡 jobstat（2026-07-25 P1）----
+// 動機：排程決策原本只進 console.log，Worker 日誌不持久＝事後查不到「今天這班到底發生什麼」。
+// 只記**狀態轉換**（fired／fresh／produced／error），不記輪詢噪音（skip/waiting）——晚場班
+// 每 5 分醒一次，全記的話一天 140+ 筆 KV 寫入且沒有資訊量。實際每日約 15-25 筆。
+export const JOBSTAT_TTL = 259200;   // 3 天（比 bkfired 的 2 天長一天，方便隔天早上回頭查昨晚）
+export const JOBSTAT_MAX = 120;      // 陣列上限，超過丟最舊（防單日異常暴衝把值撐爆）
+export const jobstatKey = (dateISO) => `jobstat:${dateISO.replaceAll("-", "")}`;
+export const hhmm = (tp) => `${String(tp.hour ?? 0).padStart(2, "0")}:${String(tp.minute ?? 0).padStart(2, "0")}`;
+export async function recordJob(env, tp, name, result, extra) {
+  if (!env.FLOW_KV) return false;
+  try {
+    const key = jobstatKey(tp.date);
+    const arr = (await env.FLOW_KV.get(key, "json")) || [];
+    arr.push(extra != null ? { t: hhmm(tp), n: name, r: result, x: extra } : { t: hhmm(tp), n: name, r: result });
+    await env.FLOW_KV.put(key, JSON.stringify(arr.slice(-JOBSTAT_MAX)), { expirationTtl: JOBSTAT_TTL });
+    return true;
+  } catch (e) { console.log("recordJob:", e && e.message); return false; }   // 記錄失敗絕不拖垮排程主體
+}
+
+// ---- 日終／晨間健檢（2026-07-25 P1）----
+// 「有沒有人在看」的最後一道：不 dispatch、不補跑，只盤點當日該有的產物是否落地，缺就告警。
+// 涵蓋 recheck 管不到的範圍——① 達 BK_MAX_ATTEMPTS 上限後仍沒落地；② 哨兵事件驅動的
+// flows/postmkt、定點班 news、事件驅動 summary（這些班沒有 bkGate recheck）。
+// mode：date=日期欄前 10 碼為今日；genToday=generated_at 台北日為今日；exists=當日檔存在即可。
+export function healthTargets(env) {
+  const V2 = env.DATA_BASE;
+  const FLOWS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/latest.json";
+  const NEWS = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
+  return {
+    eve: [
+      { name: "daysummary", url: `${V2}/daysummary/latest.json`, field: "date",         mode: "date" },
+      { name: "aetf",       url: `${V2}/aetf/latest.json`,       field: "run_date",     mode: "date" },
+      { name: "baseline",   url: `${V2}/baseline.json`,          field: "date",         mode: "date" },
+      { name: "intraday",   url: `${V2}/intraday/{date}.json`,   field: "date",         mode: "date" },
+      { name: "flows",      url: FLOWS,                          field: "date",         mode: "date" },
+      { name: "postmkt",    url: `${POSTMKT_BASE}/data/postmkt.json`,                    field: "date",         mode: "date" },
+      { name: "diag",       url: `${POSTMKT_BASE}/data/diag/diag.json`,                  field: "date",         mode: "date" },
+      { name: "mktbal",     url: `${POSTMKT_BASE}/data/market_balance_history.json`,     field: "latest_date",  mode: "date" },
+      { name: "news",       url: NEWS,                           field: "generated_at", mode: "genToday" },
+      { name: "summary-pm", url: `${POSTMKT_BASE}/data/summary/{ymd}-pm.json`,           field: null,           mode: "exists" },
+    ],
+    morn: [
+      { name: "morning",    url: `${V2}/morning.json`,           field: "generated_at", mode: "genToday" },
+      { name: "us",         url: `${V2}/us.json`,                field: "generated_at", mode: "genToday" },
+      { name: "summary-am", url: `${POSTMKT_BASE}/data/summary/{ymd}-am.json`,           field: null,           mode: "exists" },
+    ],
+  };
+}
+// 單項判定（純函式）：ok=已落地；at=產物上的時間（給告警文字用，抓不到檔回 null）
+export function healthVerdict(t, obj, today) {
+  if (t.mode === "exists") return { ok: !!obj, at: obj ? "有檔" : null };
+  if (!obj) return { ok: false, at: null };
+  return { ok: productFresh(obj, t, today), at: String(obj[t.field] || "").slice(0, 19) || null };
+}
+export function healthUrl(t, today) {
+  return t.url.replace("{date}", today).replace("{ymd}", today.replaceAll("-", ""));
+}
+// 一輪健檢：併發抓全部產物 → 缺件清單 → 告警（opts.dry 只回結果不告警、不記錄）。
+// **刻意不拿 series 當守門**：其他班用「當日 series 存在＝交易日」是合理的，但健檢是看門狗——
+// 拿一個可能自己壞掉的訊號當守門，等於故障時把看門狗一起弄瞎（2026-07-25 實例：07-24 整天
+// 沒有任何 frame/series，所有 TW 主觸發被守門靜默跳過、系統退化成只剩延遲的 GH cron，
+// 若健檢也照守門就同樣不會叫）。改成：series 缺只當「提示」寫進告警，照樣盤點照樣叫。
+// 代價＝國定假日會誤報一次（每年約 10 次，訊息會標「無盤中 series，可能為休市」，一眼可辨），
+// 換到的是「真故障一定叫得出來」。
+export async function runHealthCheck(env, tp, slot, fetchFn = fetch, opts = {}) {
+  const today = tp.date;
+  let noSeries = false;
+  if (env.FLOW_KV) {
+    const series = await env.FLOW_KV.get(`series:${today}`, "json");
+    noSeries = !series || !series.length;
+  }
+  const targets = healthTargets(env)[slot] || [];
+  const rows = await Promise.all(targets.map(async (t) => {
+    const obj = await fetchProduct(healthUrl(t, today), fetchFn).catch(() => null);
+    return { name: t.name, ...healthVerdict(t, obj, today) };
+  }));
+  const missing = rows.filter((r) => !r.ok);
+  const label = missing.map((m) => `${m.name}(${m.at || "無檔"})`);
+  const out = { slot, date: today, checked: rows.length, noSeries, missing: label, rows };
+  if (opts.dry) return out;
+  if (missing.length) {
+    // series 缺＝要嘛休市、要嘛盤中 frame 班故障（後者會連帶讓所有 TW 主觸發靜默跳過），
+    // 兩種都該讓使用者一眼看到，所以直接寫進告警文字。
+    const note = noSeries ? "（無盤中 series，可能為休市或 frame 班故障）" : "";
+    await alertJob(env, tp, `health-${slot}`,
+      `🩺 ${slot === "eve" ? "日終" : "晨間"}健檢：${missing.length}/${rows.length} 項未落地${note} — ${label.join("、")}`, fetchFn);
+  }
+  await recordJob(env, tp, `health-${slot}`, missing.length ? `missing:${missing.length}` : "all-ok",
+    missing.length ? label.join(",") : undefined);
   return out;
 }
 
@@ -1910,6 +2023,9 @@ export default {
         ctx.waitUntil(runBackup(env, tp, bpipe).catch((e) => console.log("backup:", e && e.message)));
       } else if (droute.kind === "evening") {
         ctx.waitUntil(runEvening(env, tp).catch((e) => console.log("evening:", e && e.message)));
+      } else if (droute.kind === "health") {
+        // 健檢班：不 dispatch、只盤點產物，缺件告警（失敗只 log，絕不影響其他班）
+        ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
       } else if (droute.kind === "summary-am") {
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
       }
@@ -2070,6 +2186,29 @@ export default {
         return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
+    if (url.pathname === "/health") {  // 日終/晨間健檢手動查（?slot=eve|morn；dry 預設 1＝只回結果不告警）
+      const slot = url.searchParams.get("slot") || "eve";
+      if (slot !== "eve" && slot !== "morn") return json({ error: "slot 需為 eve/morn" }, { "Cache-Control": "no-store" });
+      const dry = url.searchParams.get("dry") !== "0";
+      // ?date= 可回頭盤點某一天（除錯用；健檢不 dispatch 任何東西，最壞只是多抓幾份產物）
+      const d = url.searchParams.get("date");
+      const tp = d ? { ...taipeiParts(), date: d } : taipeiParts();
+      try {
+        const out = await runHealthCheck(env, tp, slot, fetch, { dry });
+        return json({ dry, ...out }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/jobs") {  // 排程狀態軌跡（?date=YYYY-MM-DD，預設今日；單 key 1 get，無 list）
+      const d = url.searchParams.get("date") || taipeiParts().date;
+      try {
+        const events = (await env.FLOW_KV.get(jobstatKey(d), "json")) || [];
+        return json({ date: d, count: events.length, events }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname === "/alerts/log") {  // 第九期：近 24h 事件紀錄（單 key 1 get，無 list）
       try {
         const lg = (await env.FLOW_KV.get(ALERTS_LOG_KEY, "json")) || { ev: [] };
@@ -2082,7 +2221,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening", "/health", "/jobs"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {

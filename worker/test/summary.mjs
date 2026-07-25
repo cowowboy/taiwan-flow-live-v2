@@ -135,7 +135,7 @@ const READY_PM = {
   const out = await runSummaryDispatch({ ...ENV_BASE, GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, "pm",
     mkFetch({ ...READY_PM, [SUM_URL]: { slot: "pm" } }, spy));
   chk("pm 已產出 → skipped already-produced", out.skipped === "already-produced");
-  chk("已產出 → 補記 KV＋零 dispatch", kv._m.get("sumfired:20260721:pm") === "produced" && spy.length === 0);
+  chk("已產出 → 補記 KV＋零 dispatch", JSON.parse(kv._m.get("sumfired:20260721:pm")).s === "produced" && spy.length === 0);
 }
 // 6) 三源未齊 → waiting、KV 不記、不 dispatch
 {
@@ -154,7 +154,7 @@ const READY_PM = {
   chk("pm 全齊 → fired", out.fired === true);
   chk("dispatch 打 summary.yml", spy[0]?.url.includes("/postmkt/actions/workflows/summary.yml/dispatches"), spy[0]?.url);
   chk("dispatch body 帶 slot=pm", spy[0]?.body === JSON.stringify({ ref: "main", inputs: { slot: "pm" } }), spy[0]?.body);
-  chk("KV 記 sumfired", kv._m.get("sumfired:20260721:pm") === "fired");
+  chk("KV 記 sumfired（JSON 狀態）", JSON.parse(kv._m.get("sumfired:20260721:pm")).s === "fired");
 }
 // 8) dry → wouldDispatch、不真發、KV 不記
 {

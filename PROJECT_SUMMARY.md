@@ -1,10 +1,38 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-25（排程可靠度補強：dispatch 成功 ≠ job 成功 → bkGate recheck ＋ 排程失敗告警接 LINE）
+最後更新：2026-07-25（排程可靠度補強 P0+P1：bkGate recheck、失敗告警、日終/晨間健檢、jobstat 軌跡）
 
 ## 快速接手
 
-- **排程可靠度補強（2026-07-25，deploy version `9c8a64a6`）**：修掉「dispatch 回 204 就寫
+- **⚠️ 未解問題：2026-07-24（週五）盤中 frame 班整天沒落格**（2026-07-25 盤點 KV 時發現）。
+  證據：KV namespace 全部只剩 4 個 key（`alerts:cfg`／`flow:last`／`usw:*`／`bkfired:20260724:us`），
+  **沒有任何 `f:`／`fi:`／`series:`／`sentinel:` key**（TTL 2 天，07-24 的應該都還在）；
+  `data/intraday/2026-07-24.json` 404（該日回測樣本已永久遺失，frame TTL 過期無法補）。
+  連鎖效應：`series:<date>` 是 TW 班的交易日守門 → 缺 series ＝ **所有 TW 主觸發被靜默跳過**，
+  系統退化成只剩延遲的 GH cron（daysummary latest.json `generated_at` 07-24T17:06 即為佐證，
+  Worker 主觸發應為 13:35）。us 班因 `tw:false` 不看 series，是唯一有 fired 紀錄的班。
+  **已排除**：FinMind token、KV 寫入、storeFrame 本身——07-25 手動打 `/snap?force=1` 成功寫入
+  `f:2026-07-25:22:51`（2805 檔）；news 班（cron `7,47 …`）07-25 22:07 仍正常 dispatch，
+  代表 scheduled handler 有在跑。**未確認**：`* 1-5 * * 1-5` 這條 cron 07-24 到底有沒有被觸發
+  （原本沒開 Workers Logs，事後查不到）。**下一步**：已開 `[observability]`，下個交易日
+  （2026-07-27 週一）09:00 後跑 `npx wrangler tail` 或看 dashboard invocation，確認該 cron 有無觸發；
+  同時 09:30 晨間健檢與 23:50 日終健檢會主動叫（若再發生，這次不會再靜默一整天）。
+
+- **健檢＋狀態軌跡（2026-07-25 P1，deploy version `fcac14fd`）**：
+  ① **日終 23:50／晨間 09:30 健檢班**（CF cron 17→19 條）：不 dispatch、不補跑，只盤點當日該有的
+  產物是否落地——eve 十項（daysummary/aetf/baseline/intraday/flows/postmkt/diag/mktbal/news/summary-pm）、
+  morn 三項（morning/us/summary-am），缺件走 `alertJob` 發一則 LINE。補的是 recheck 管不到的兩個洞：
+  達重試上限後仍沒落地、以及哨兵/事件驅動類管線（flows/postmkt/news/summary）本來就沒有 recheck。
+  **刻意不拿 `series` 當守門**（看門狗不能用可能自己壞掉的訊號當守門，見上方 07-24 事故）——
+  series 缺只在告警文字標「可能為休市或 frame 班故障」，代價是國定假日每年誤報約 10 次。
+  ② **jobstat 軌跡**：`jobstat:<YYYYMMDD>`（TTL 3 天、上限 120 筆）只記狀態轉換
+  （fired#n／landed／fresh／produced／error／health 結果），不記輪詢 skip 噪音（晚場班每 5 分醒一次，
+  全記一天 140+ 筆且無資訊量），實際每日約 15-25 筆。③ 新端點 `/health?slot=eve|morn&date=&dry=1`
+  （dry 預設 1＝只回盤點不告警，`date=` 可回頭查某天）與 `/jobs?date=`。④ 開啟 `[observability]`
+  （Workers Logs）——原本 console.log 不落地，07-24 事故事後查不到 cron 有沒有被觸發。
+  **驗證**：test/health.mjs 48 綠、backup.mjs 102 綠、summary.mjs 64 綠，其餘全綠（parity 31 失敗為
+  既有參考檔漂移）；線上 `/health?slot=eve` 實際回傳 10 項盤點結果、`/jobs` 正常。
+- **排程可靠度補強（2026-07-25 P0，deploy version `9c8a64a6`）**：修掉「dispatch 回 204 就寫
   `bkfired`、之後一律短路」的盲點——首發的 GH run 若自己失敗、產物沒更新，Worker 當日不再補救
   （五條單發班各只有一條主 cron ＝ Worker 端零重試，只剩 GH 兜底一次）。三處改動：
   ① KV `bkfired` 值升級為 JSON `{s,ts,n}`（`parseBkState`／`bkGate`／`bkStateValue`，

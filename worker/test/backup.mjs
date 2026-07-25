@@ -2,7 +2,7 @@
 // 執行：cd worker && node test/backup.mjs
 import { backupPipelines, backupPipelineForCron, BACKUP_CRONS, bkfiredKey,
   productFresh, runBackup, parseBkState, bkGate, bkStateValue, alertedKey,
-  BK_RECHECK_MS, BK_MAX_ATTEMPTS } from "../src/index.js";
+  BK_RECHECK_MS, BK_MAX_ATTEMPTS, HEALTH_CRONS, jobstatKey } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -48,8 +48,8 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
   chk("recheck cron 命中 us（台北 05:35，dow *）", backupPipelineForCron("35 21 * * *", ENV)?.name === "us");
   // cron 字串不得與既有任何一條重複（重複＝覆蓋掉別班的路由）
   const all = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7,47 0-14,22-23 * * *", "*/5 13-15 * * 1-5",
-    "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *", ...Object.keys(BACKUP_CRONS)];
-  chk("全部 cron 字串互不重複", new Set(all).size === all.length);
+    "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *", ...Object.keys(BACKUP_CRONS), ...Object.keys(HEALTH_CRONS)];
+  chk("全部 cron 字串互不重複（含健檢班共 19 條）", new Set(all).size === all.length && all.length === 19, String(all.length));
   chk("cron 命中 daysummary（主觸發 13:35）", backupPipelineForCron("35 5 * * 1-5", ENV)?.name === "daysummary");
   chk("cron 命中 intraday（備援 14:40）", backupPipelineForCron("40 6 * * 1-5", ENV)?.name === "intraday");
   chk("cron 命中 aetf（主觸發 18:35）", backupPipelineForCron("35 10 * * 1-5", ENV)?.name === "aetf");
@@ -325,6 +325,21 @@ const ALERT_ENV = (kv) => ({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv, ALERT_WEBHOOK:
     mkFetch2({ date: "2026-07-17" }, 401, spy, alerts), { nowMs: NOW, sleepFn: async () => {} });
   chk("無告警通道 → 不打 webhook", alerts.length === 0);
   chk("無告警通道 → 排程決策照常回 error", !!out.error);
+}
+
+// 19) jobstat：只記狀態轉換（fired/landed/fresh/error），不記輪詢 skip 噪音
+{
+  const spy = [], alerts = [], kv = TRADING_KV();
+  const f = (prod) => mkFetch2(prod, 204, spy, alerts);
+  await runBackup(ALERT_ENV(kv), TP, byName.baseline, f({ date: "2026-07-17" }), { nowMs: NOW });
+  let ev = JSON.parse(kv._m.get(jobstatKey("2026-07-20")));
+  chk("fired 記一筆 fired#1", ev.length === 1 && ev[0].n === "baseline" && ev[0].r === "fired#1", JSON.stringify(ev));
+  await runBackup(ALERT_ENV(kv), TP, byName.baseline, f({ date: "2026-07-17" }), { nowMs: NOW + 60e3 });
+  ev = JSON.parse(kv._m.get(jobstatKey("2026-07-20")));
+  chk("冷卻期 skip → 不寫 jobstat", ev.length === 1, JSON.stringify(ev));
+  await runBackup(ALERT_ENV(kv), TP, byName.baseline, f({ date: "2026-07-20" }), { nowMs: NOW + 40 * 60e3 });
+  ev = JSON.parse(kv._m.get(jobstatKey("2026-07-20")));
+  chk("recheck 確認落地 → 記 landed", ev.length === 2 && ev[1].r === "landed", JSON.stringify(ev));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);
