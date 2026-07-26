@@ -1300,6 +1300,7 @@ export async function sendAlert(env, text, fetchFn = fetch) {
 export const ALERTED_TTL = 172800;
 export const alertedKey = (dateISO, tag) => `alerted:${dateISO.replaceAll("-", "")}:${tag}`;
 export async function alertJob(env, tp, tag, text, fetchFn = fetch) {
+  if (tp.dow != null && (tp.dow < 1 || tp.dow > 5)) return { skipped: "weekend" };
   try {
     const key = alertedKey(tp.date, tag);
     if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { skipped: "already-alerted" };
