@@ -414,6 +414,44 @@ def run_r1(stock_samples, sector_samples, lines):
     lines.append("")
 
 
+# ── R2. 土洋同買的 Regime 切分（補測，對應圖卡規格卡2）──────
+# R1 的 6 組訊號不含土洋同買（M3 段沒做多空切分），規格因此把卡2 列為
+# 「未驗證、不得外推不翻向」。這段就是補上那一格。
+def run_r2(stock_samples, lines):
+    lines.append("\n# R2. 土洋同買 Regime 切分（補測）")
+    lines.append("R1 未涵蓋此組合（M3 段無多空切分），"
+                 "依 docs/line-cards-spec.md 卡2 待驗證項補測。")
+    sig = [r for r in stock_samples
+           if r["surge"] >= 2 and r["ret"] >= 0.02 and r["pos"] >= 0.7
+           and not r["lim"] and r["it3"] >= 2 and r["fi3"] >= 2]
+    bull = [r for r in sig if r["regime"] == "bull"]
+    bear = [r for r in sig if r["regime"] == "bear"]
+    sa, sb, se = stat(sig), stat(bull), stat(bear)
+    lines.append(fmt("全環境（對照 M3 基準）", sa))
+    lines.append(fmt("  多頭 regime", sb))
+    lines.append(fmt("  空頭 regime", se))
+    b_avg = sb["e3_avg"] if sb else None
+    e_avg = se["e3_avg"] if se else None
+    flipped = (b_avg is not None and e_avg is not None
+               and (b_avg > 0) != (e_avg > 0))
+    lines.append(f"  超額翻向：{'是 ⚠' if flipped else '否'}\n")
+
+    if sb is None or se is None:
+        lines.append("**結論**：多頭或空頭樣本不足，無法判定，卡2 維持「未驗證」")
+    elif flipped:
+        lines.append(f"**結論**：翻向 ⚠ 卡2 需掛 regime 閘門"
+                     f"（多頭 avg{b_avg:+.2f}%、空頭 avg{e_avg:+.2f}%）")
+    else:
+        lines.append(f"**結論**：不翻向，卡2 不需 regime 閘門"
+                     f"（多頭 avg{b_avg:+.2f}%、空頭 avg{e_avg:+.2f}%）")
+
+    lines.append("\n### 多頭逐月")
+    monthly(bull, fmt, lines)
+    lines.append("\n### 空頭逐月")
+    monthly(bear, fmt, lines)
+    lines.append("")
+
+
 # ── M1. 次產業湧入排序 ──────────────────────────────────
 def run_m1(sector_samples, lines):
     lines.append("\n# M1. 次產業湧入排序")
@@ -471,6 +509,48 @@ def run_m2(stock_samples, lines):
 
     lines.append("\n### 逐月")
     monthly(target, fmt, lines)
+    lines.append("")
+
+
+# ── M4. 突破20日新高單條件版排序（補測，對應圖卡規格卡3）─────
+# M2 交集版陣亡後規格退回單條件，但「單條件版該依什麼排序」從未驗證。
+# 採用門檻 0.30% 是**動手前先訂**的判準（介於已採用的卡4 0.45% 與
+# 已否決的卡5 0.17% 之間），避免事後挑一個好看的數字硬說有效。
+M4_MIN_SPREAD = 0.30
+
+
+def run_m4(stock_samples, lines):
+    lines.append("\n# M4. 突破20日新高單條件版排序（補測）")
+    lines.append("M2 交集版陣亡後退回單條件，但單條件版排序欄未經驗證，"
+                 "依 docs/line-cards-spec.md 卡3 待驗證項補測。")
+    lines.append(f"候選排序欄為本次設計選擇（非 M2 結論）；"
+                 f"採用門檻＝分離度 ≥{M4_MIN_SPREAD:.2f}%（先訂後驗）。")
+    sig = [r for r in stock_samples if r["brk"] and not r["lim"]]
+    lines.append(fmt("突破20日新高（排除漲停鎖死）", stat(sig)))
+    lines.append("")
+
+    best_name, best_spread, best_mono = None, 0.0, False
+    for key, name, rev in [("ints", "法人買強度", True),
+                           ("volt", "量能趨勢", True),
+                           ("bias", "乖離率", True)]:
+        q = quintile(sig, key, reverse=rev)
+        fmt_quintile(q, name, lines)
+        if q and abs(q["spread"]) > abs(best_spread):
+            best_name, best_spread, best_mono = name, q["spread"], q["monotone"]
+        lines.append("")
+
+    if best_name is None:
+        lines.append("**結論**：三個候選皆樣本不足，卡3 不排序")
+    elif abs(best_spread) < M4_MIN_SPREAD:
+        lines.append(f"**結論**：最佳候選 **{best_name}** 分離度僅 "
+                     f"{abs(best_spread):.2f}%，未達先訂門檻 {M4_MIN_SPREAD:.2f}%"
+                     f"，卡3 不排序")
+    else:
+        lines.append(f"**結論**：排序欄位採用 **{best_name}**（分離度 "
+                     f"{abs(best_spread):.2f}%，{'單調' if best_mono else '非單調'}）")
+
+    lines.append("\n### 逐月")
+    monthly(sig, fmt, lines)
     lines.append("")
 
 
@@ -612,7 +692,7 @@ def main():
     print(f"次產業 sector-day 樣本：{len(sector_samples):,}")
 
     lines = [
-        f"# 回測報告：圖卡體系多空排序驗證（7 項）",
+        f"# 回測報告：圖卡體系多空排序驗證（9 項＝原 7 項 ＋ R2/M4 補測）",
         f"期間 {days[0]} ~ {days[-1]}（{len(days)} 交易日）"
         f"· 流動性 ≥ {LIQ / 1e8:.0f} 億 · 排除 ETF/興櫃",
         f"個股 stock-day 樣本：{len(stock_samples):,}",
@@ -622,12 +702,16 @@ def main():
 
     print("\n--- R1 Regime ---", flush=True)
     run_r1(stock_samples, sector_samples, lines)
+    print("--- R2 土洋同買 Regime（補測）---", flush=True)
+    run_r2(stock_samples, lines)
     print("--- S1 跌破新低 ---", flush=True)
     run_s1(stock_samples, lines)
     print("--- M1 次產業排序 ---", flush=True)
     run_m1(sector_samples, lines)
     print("--- M2 新高∩法人買 ---", flush=True)
     run_m2(stock_samples, lines)
+    print("--- M4 新高單條件排序（補測）---", flush=True)
+    run_m4(stock_samples, lines)
     print("--- M3 土洋同買 ---", flush=True)
     run_m3(stock_samples, lines)
     print("--- S2 退出＋法人賣 ---", flush=True)
@@ -643,6 +727,10 @@ def main():
         "- 五分位切分：N<250 改三分位並標註；切分依等分 index。",
         "- 連續日數計算：中間缺資料日（停牌/不過流動性門檻）視為中斷。",
         "- Regime 定義：TAIEX 收盤在自身 20 日均線之上＝多頭，之下＝空頭。",
+        f"- M4 的採用門檻 {M4_MIN_SPREAD:.2f}% 是動手前先訂的判準（介於已採用的卡4 "
+        f"0.45% 與已否決的卡5 0.17% 之間），非事後挑選；候選欄位亦為設計選擇非回測結論。",
+        "- R2/M4 為 2026-07-26 補測項：R2 補 R1 未涵蓋的土洋同買多空切分（規格卡2），"
+        "M4 補 M2 陣亡後單條件版的排序欄（規格卡3）。",
     ])
 
     out = ROOT / "backtest" / "report_sorting.md"
