@@ -421,6 +421,8 @@ def run_r2(stock_samples, lines):
     lines.append("\n# R2. 土洋同買 Regime 切分（補測）")
     lines.append("R1 未涵蓋此組合（M3 段無多空切分），"
                  "依 docs/line-cards-spec.md 卡2 待驗證項補測。")
+    lines.append("篩選：湧入訊號(S≥2 R≥2% P≥0.7)＋土洋同買(投信近3日≥2買 且 外資近3日≥2買)"
+                 "——與 M3 同一母體")
     sig = [r for r in stock_samples
            if r["surge"] >= 2 and r["ret"] >= 0.02 and r["pos"] >= 0.7
            and not r["lim"] and r["it3"] >= 2 and r["fi3"] >= 2]
@@ -529,25 +531,29 @@ def run_m4(stock_samples, lines):
     lines.append(fmt("突破20日新高（排除漲停鎖死）", stat(sig)))
     lines.append("")
 
-    best_name, best_spread, best_mono = None, 0.0, False
+    # 「分位切不出來」與「切得出來但分離度為 0」是兩件事，不可共用同一條文案
+    # （沿用 run_m1 的 candidates 寫法：只有 q 為真才進候選，空候選才叫樣本不足）
+    candidates = []
     for key, name, rev in [("ints", "法人買強度", True),
                            ("volt", "量能趨勢", True),
                            ("bias", "乖離率", True)]:
         q = quintile(sig, key, reverse=rev)
         fmt_quintile(q, name, lines)
-        if q and abs(q["spread"]) > abs(best_spread):
-            best_name, best_spread, best_mono = name, q["spread"], q["monotone"]
+        if q:
+            candidates.append((abs(q["spread"]), name, q["monotone"]))
         lines.append("")
 
-    if best_name is None:
-        lines.append("**結論**：三個候選皆樣本不足，卡3 不排序")
-    elif abs(best_spread) < M4_MIN_SPREAD:
-        lines.append(f"**結論**：最佳候選 **{best_name}** 分離度僅 "
-                     f"{abs(best_spread):.2f}%，未達先訂門檻 {M4_MIN_SPREAD:.2f}%"
-                     f"，卡3 不排序")
+    if not candidates:
+        lines.append("**結論**：三個候選的分位皆切不出來（樣本不足），卡3 不排序")
     else:
-        lines.append(f"**結論**：排序欄位採用 **{best_name}**（分離度 "
-                     f"{abs(best_spread):.2f}%，{'單調' if best_mono else '非單調'}）")
+        best_spread, best_name, best_mono = max(candidates, key=lambda t: t[0])
+        if best_spread < M4_MIN_SPREAD:
+            lines.append(f"**結論**：最佳候選 **{best_name}** 分離度僅 "
+                         f"{best_spread:.2f}%，未達先訂門檻 {M4_MIN_SPREAD:.2f}%"
+                         f"，卡3 不排序")
+        else:
+            lines.append(f"**結論**：排序欄位採用 **{best_name}**（分離度 "
+                         f"{best_spread:.2f}%，{'單調' if best_mono else '非單調'}）")
 
     lines.append("\n### 逐月")
     monthly(sig, fmt, lines)
