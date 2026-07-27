@@ -155,7 +155,9 @@ def test_tertile_fallback():
 
 def test_section_conventions():
     """段落慣例：標題帶前置換行、結論行格式、段尾空行。"""
-    for fn, title in [(rs.run_r2, "# R2."), (rs.run_m4, "# M4.")]:
+    # S3 納入：其結論行原本是手改 report.md 補的（commit f46aaf8），
+    # 腳本沒產出，重跑即消失。這裡守住「結論行必須由腳本產出」。
+    for fn, title in [(rs.run_r2, "# R2."), (rs.run_m4, "# M4."), (rs.run_s3, "# S3.")]:
         lines = []
         fn(mk(300, surge_in=True), lines)
         check(f"{title} 標題帶前置空行", lines[0].startswith("\n" + title))
