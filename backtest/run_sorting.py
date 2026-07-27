@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 import gzip, json, statistics as st
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +16,8 @@ CACHE = ROOT / "backtest" / "cache"
 LIQ = 1e8
 SEC_AMT_MIN = 10e8
 MIN_MEMBERS = 5
+# 排序欄的最大平手率上限：超過此值視為「無有效變異」，不得作為排序欄。
+MAX_TIE_RATE = 0.50
 
 
 def rgz(p):
@@ -57,6 +60,10 @@ def build_stock_samples(days, price, inst):
     codes = set()
     for d in days:
         codes.update(c for c in price[d] if c != "_TAIEX" and not c.startswith("00"))
+    # 固定迭代順序：set 的走訪順序依 PYTHONHASHSEED 每個 process 隨機，會透過
+    # stock_samples 的順序傳遞到 quintile() 的穩定排序，讓平手樣本的分組隨機化。
+    # 詳見 docs/line-cards-spec.md 第 8 節。
+    codes = sorted(codes)
 
     stock_ts = {}
     for c in codes:
@@ -303,11 +310,24 @@ def monthly(rows, fmt_fn, lines):
 
 
 # ── 五分位分析 ──────────────────────────────────────────
+def max_tie_rate(rows, key):
+    """該欄最大重複值的占比。1.0 = 全部同值，無任何排序資訊。"""
+    vals = [r[key] for r in rows if r.get(key) is not None]
+    if not vals:
+        return None
+    return Counter(vals).most_common(1)[0][1] / len(vals)
+
+
 def quintile(rows, key, reverse=False, min_q=50):
     valid = [r for r in rows if r.get(key) is not None]
     valid.sort(key=lambda r: r[key], reverse=reverse)
     n = len(valid)
     if n < min_q * 3:
+        return None
+    # 平手率守門：分位切點若落在一大堆同值樣本裡，分組等於按輸入順序亂切，
+    # 算出來的分離度是排序假象而非訊號。S2 的 consec_exit 有 98.2% 樣本值為 1（N=1378，分布 {1:1353, 2:23, 3:2}），
+    # 曾產出 0.07~1.44% 的浮動「分離度」。回 None＝該欄不進候選（失效安全方向）。
+    if max_tie_rate(valid, key) > MAX_TIE_RATE:
         return None
     if n < min_q * 5:
         k = n // 3
@@ -348,9 +368,15 @@ def _fval(v):
     return f"{v:.4f}"
 
 
-def fmt_quintile(q, key_name, lines):
+def fmt_quintile(q, key_name, lines, rows=None, key=None):
     if not q:
-        lines.append(f"  排序：{key_name} — 樣本不足，無法切分位")
+        # 「樣本不足」與「無有效變異」是兩件事，理由不可共用同一條文案。
+        tie = max_tie_rate(rows, key) if rows is not None and key else None
+        if tie is not None and tie > MAX_TIE_RATE:
+            lines.append(f"  排序：{key_name} — 無有效變異（最大平手率 {tie * 100:.1f}%"
+                         f" > 上限 {MAX_TIE_RATE * 100:.0f}%），不列入候選")
+        else:
+            lines.append(f"  排序：{key_name} — 樣本不足，無法切分位")
         return
     lines.append(f"  排序：{key_name}（{q['mode']}，N={q['n']}）")
     for g in q["groups"]:
@@ -466,7 +492,7 @@ def run_m1(sector_samples, lines):
                             ("ret", "R 值（當日等權漲幅）", True),
                             ("consec", "連續湧入日數", True)]:
         q = quintile(sig, key, reverse=rev)
-        fmt_quintile(q, name, lines)
+        fmt_quintile(q, name, lines, sig, key)
         lines.append("")
         if q:
             candidates.append((name, abs(q["spread"]), q["monotone"], q["direction"]))
@@ -502,8 +528,14 @@ def run_m2(stock_samples, lines):
             target = brk_only
         else:
             q = quintile(both, "ints", reverse=True)
-            fmt_quintile(q, "法人買強度", lines)
-            lines.append("**結論**：交集採用，排序依法人買強度")
+            fmt_quintile(q, "法人買強度", lines, both, "ints")
+            # 這行原本無條件印出：即使 q 為 None（樣本不足或無有效變異）也宣告
+            # 「排序依法人買強度」，與上一行剛印的降級說明自相矛盾。七個 quintile
+            # 呼叫點中唯一不是失效安全的一處。
+            if q:
+                lines.append("**結論**：交集採用，排序依法人買強度")
+            else:
+                lines.append("**結論**：交集採用，但排序欄無法切分位，交集版不排序")
             target = both
     else:
         target = brk_only
@@ -540,7 +572,7 @@ def run_m4(stock_samples, lines):
                            ("volt", "量能趨勢", True),
                            ("bias", "乖離率", True)]:
         q = quintile(sig, key, reverse=rev)
-        fmt_quintile(q, name, lines)
+        fmt_quintile(q, name, lines, sig, key)
         if q:
             candidates.append((abs(q["spread"]), name, q["monotone"]))
         lines.append("")
@@ -578,7 +610,7 @@ def run_m3(stock_samples, lines):
                             ("foreign_buy_amt", "外資當日買超金額", True),
                             ("surge", "個股集中度分數 S", True)]:
         q = quintile(sig, key, reverse=rev)
-        fmt_quintile(q, name, lines)
+        fmt_quintile(q, name, lines, sig, key)
         if q and q["groups"][0]["e3_med"] > 0:
             any_q1_pos = True
             lines.append(f"  → Q1 med 為正")
@@ -617,7 +649,7 @@ def run_s1(stock_samples, lines):
                             ("ints", "法人賣強度（越負越前）", False),
                             ("volt", "量能趨勢（越大越前）", True)]:
         q = quintile(yellow, key, reverse=rev)
-        fmt_quintile(q, name, lines)
+        fmt_quintile(q, name, lines, yellow, key)
         lines.append("")
         if q:
             candidates.append((name, abs(q["spread"]), q["monotone"], q["direction"]))
@@ -626,6 +658,10 @@ def run_s1(stock_samples, lines):
         best = max(candidates, key=lambda x: x[1])
         lines.append(f"**結論**：弱勢榜排序欄位採用 **{best[0]}**"
                      f"（分離度 {best[1]:.2f}%，{best[3]}）")
+    else:
+        # 平手率守門上線後這條路徑變得可達（三個候選可能全被擋）。
+        # 沒有 else 的話整段不會有結論行，會同時打破煙霧測試與 CI 行號守門。
+        lines.append("**結論**：三個候選皆無法切分位（樣本不足或無有效變異），弱勢榜不排序")
 
     lines.append("\n### 黃色層逐月")
     monthly(yellow, fmt_dn, lines)
@@ -646,7 +682,7 @@ def run_s2(stock_samples, lines):
     for key, name, rev in [("ints", "法人賣強度（越負越前）", False),
                             ("consec_exit", "連續退出日數（越多越前）", True)]:
         q = quintile(sig, key, reverse=rev)
-        fmt_quintile(q, name, lines)
+        fmt_quintile(q, name, lines, sig, key)
         lines.append("")
         if q:
             candidates.append((name, abs(q["spread"]), q["monotone"], q["direction"]))
@@ -655,6 +691,9 @@ def run_s2(stock_samples, lines):
         best = max(candidates, key=lambda x: x[1])
         lines.append(f"**結論**：排序欄位採用 **{best[0]}**"
                      f"（分離度 {best[1]:.2f}%，{best[3]}）")
+    else:
+        # 同 run_s1：守門上線後這條路徑可達，缺 else 會整段沒有結論行。
+        lines.append("**結論**：兩個候選皆無法切分位（樣本不足或無有效變異），卡5 不排序")
 
     lines.append("\n### 逐月")
     monthly(sig, fmt_dn, lines)
@@ -670,7 +709,7 @@ def run_s3(stock_samples, lines):
     lines.append("")
 
     q = quintile(sig, "surge", reverse=True)
-    fmt_quintile(q, "S 值（越大越前＝越危險）", lines)
+    fmt_quintile(q, "S 值（越大越前＝越危險）", lines, sig, "surge")
 
     # 結論行必須由腳本產出：commit f46aaf8 當初是手改 report.md 補這行，
     # 重跑就會被洗掉（本次重跑即重現該回歸）。

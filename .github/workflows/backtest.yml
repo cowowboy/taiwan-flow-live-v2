@@ -1,0 +1,76 @@
+# 守門目的：backtest/run_sorting.py 的產出物 report_sorting.md 是圖卡規格
+# （docs/line-cards-spec.md）的唯一回測依據，但 backtest/cache/ 不進 git，
+# CI 無法重跑腳本比對。這支跑離線煙霧測試，涵蓋不需要快取就能驗的部分：
+#   - 各 run_* 函式的程式路徑走得通、降級分支文案正確
+#   - 分位切分的平手率守門與順序無關性（2026-07-26 的不可重現問題）
+#   - 已 commit 的 report_sorting.md 九段齊全、各段都有腳本產出的結論行
+#     （守 commit f46aaf8 那類「結論行手改進報告、重跑就消失」的回歸）
+# 完整的「重跑比對報告」需要 FINMIND_TOKEN 與約 50 分鐘抓快取，見
+# docs/line-cards-spec.md 第 8 節「仍待處理」。
+# 沿用 canon.yml 的既有原則：不吃任何 secret。
+name: backtest
+
+on:
+  push:
+    paths:
+      - 'backtest/**'
+      - 'docs/line-cards-spec.md'
+      - '.github/workflows/backtest.yml'
+  pull_request:
+    paths:
+      - 'backtest/**'
+      - 'docs/line-cards-spec.md'
+      - '.github/workflows/backtest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 語法檢查
+        run: python -m py_compile backtest/run_sorting.py backtest/test_sorting_smoke.py
+
+      - name: 離線煙霧／回歸測試
+        run: python backtest/test_sorting_smoke.py
+
+      # 測試本身刻意不吃 PYTHONHASHSEED，跑兩個 seed 是要證明它不依賴迭代順序。
+      # 若哪天有人在 quintile() 又引進順序相依，這一步會抓到。
+      - name: 順序無關性（換 hash seed 重跑）
+        run: PYTHONHASHSEED=7 python backtest/test_sorting_smoke.py
+
+      - name: 規格引用的報告行號仍指向對應結論行
+        run: |
+          python - <<'PY'
+          import re, sys
+
+          spec = open('docs/line-cards-spec.md', encoding='utf-8').read()
+          report = open('backtest/report_sorting.md', encoding='utf-8').read().split('\n')
+
+          # 表格列：| N | 卡名 | … | `report_sorting.md:123` | 或 | `:123` … |
+          rows = re.findall(r'^\|\s*(\d)\s*\|([^|]+)\|.*?`(?:report_sorting\.md)?:(\d+)`',
+                            spec, re.M)
+          if len(rows) != 6:
+              sys.exit(f'FAIL: 規格表格應有 6 張卡的行號引用，實際找到 {len(rows)}')
+
+          bad = []
+          for num, name, ln in rows:
+              i = int(ln) - 1
+              if not (0 <= i < len(report)) or not report[i].startswith('**結論**'):
+                  got = report[i].strip()[:60] if 0 <= i < len(report) else '(超出檔案範圍)'
+                  bad.append(f'  卡{num} {name.strip()} → :{ln} 不是結論行，實際是「{got}」')
+
+          if bad:
+              sys.exit('FAIL: 規格引用的報告行號已失效（報告內容變動後未同步更新）\n'
+                       + '\n'.join(bad)
+                       + '\n修法：重新產生報告後，用 grep -n "^\\*\\*結論\\*\\*" '
+                         'backtest/report_sorting.md 取得新行號並更新規格表格。')
+          print(f'OK: 6 張卡的行號引用全部指向結論行')
+          PY

@@ -165,6 +165,129 @@ def test_section_conventions():
         check(f"{title} 段尾為空行", lines[-1] == "")
 
 
+def _synthetic_market(codes, ndays=40):
+    """造最小可用的 price/inst 快取結構（不碰檔案系統），供 build_stock_samples 用。"""
+    days = [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(ndays)]
+    price, inst = {}, {}
+    for t, d in enumerate(days):
+        row = {"_TAIEX": [1e12, 1000 + t, 1010 + t, 990 + t, 1000 + t]}
+        for j, c in enumerate(codes):
+            close = 100 + j + t * 0.5
+            row[c] = [5e8, close, close * 1.02, close * 0.98, close]
+        price[d] = row
+        inst[d] = {c: [1000, 2000] for c in codes}
+    return days, price, inst
+
+
+def test_build_samples_iterates_codes_in_sorted_order():
+    """build_stock_samples 必須以固定順序走訪股票代號。
+
+    codes 原本是字串 set，走訪順序依 PYTHONHASHSEED 每個 process 隨機，該順序會
+    傳遞到 quintile() 的穩定排序、讓平手樣本的分組隨機化——這正是 S2 分離度
+    在同一份快取上跑出 0.07~1.36% 的根因。守 run_sorting.py:66 的 sorted(codes)。
+    刻意用非字典序的輸入，且代號夠多（8 個 → 誤中機率 1/40320）。
+    """
+    codes = ["9999", "1101", "2330", "5432", "3008", "1216", "8046", "2317"]
+    days, price, inst = _synthetic_market(codes)
+    samples, _, _ = rs.build_stock_samples(days, price, inst)
+    check("合成資料有產出樣本", len(samples) > 0)
+    if not samples:
+        return
+    seen = []
+    for r in samples:
+        if not seen or seen[-1] != r["c"]:
+            seen.append(r["c"])
+    check(f"代號走訪順序 == 字典序（實際首現序 {seen[:4]}…）", seen == sorted(seen))
+    check("每個代號只連續出現一次（未交錯）", len(seen) == len(set(seen)))
+
+
+def test_max_tie_rate():
+    """平手率計算：全同值＝1.0，全相異＝1/N，None 不計入分母。"""
+    rows = [dict(k=1) for _ in range(9)] + [dict(k=2)]
+    check("全同值以外 9/10", abs(rs.max_tie_rate(rows, "k") - 0.9) < 1e-9)
+    check("全相異＝1/N", abs(rs.max_tie_rate([dict(k=i) for i in range(5)], "k") - 0.2) < 1e-9)
+    check("空欄回 None", rs.max_tie_rate([dict(k=None)] * 3, "k") is None)
+    mixed = [dict(k=1)] * 3 + [dict(k=None)] * 7
+    check("None 不進分母（3/3 而非 3/10）", rs.max_tie_rate(mixed, "k") == 1.0)
+
+
+def test_quintile_blocks_high_tie_column():
+    """平手率超過上限的欄位不得切分位——否則切點落在平手堆裡，分離度是假象。
+
+    這正是 S2 的 consec_exit（98.2% 樣本值為 1）曾產出 0.07~1.44% 浮動分離度的原因。
+    """
+    rows = mk(300)          # mk 的 consec_exit 全為 0 ＝ 平手率 100%
+    check("平手率 100% 的欄位回 None", rs.quintile(rows, "consec_exit") is None)
+
+    # 90%：貼近 S2 實況（實測 98.2%），仍應被擋
+    for i, r in enumerate(rows):
+        r["consec_exit"] = 1 if i < 270 else (i % 3)
+    check("平手率 90% 仍被擋", rs.quintile(rows, "consec_exit") is None)
+
+    # 連續值欄位不受影響（M4 的三個候選都屬此類）
+    check("連續值欄位照常切分位", rs.quintile(rows, "ints") is not None)
+    check("守門上限為 MAX_TIE_RATE 常數", rs.MAX_TIE_RATE == 0.50)
+
+
+def test_quintile_order_independent_without_ties():
+    """無平手時，分位結果不得依賴輸入順序（守 PYTHONHASHSEED 那類的順序污染）。"""
+    rows = mk(300)
+    for i, r in enumerate(rows):
+        r["ints"] = i / 1000.0        # 保證無平手
+    base = rs.quintile(rows, "ints", reverse=True)
+    shuffled = rows[:]
+    random.Random(7).shuffle(shuffled)
+    other = rs.quintile(shuffled, "ints", reverse=True)
+    check("打亂輸入後分離度相同", abs(base["spread"] - other["spread"]) < 1e-9)
+    check("打亂輸入後各組 N 相同",
+          [g["n"] for g in base["groups"]] == [g["n"] for g in other["groups"]])
+
+
+def test_fmt_quintile_distinguishes_reasons():
+    """「樣本不足」與「無有效變異」必須是兩條不同文案，不可混用。"""
+    lines = []
+    rs.fmt_quintile(None, "連續退出日數", lines, mk(300), "consec_exit")
+    check("無變異時印『無有效變異』", "無有效變異" in lines[0])
+    check("無變異時印出實際平手率", "100.0%" in lines[0])
+    check("無變異時不得誤稱樣本不足", "樣本不足" not in lines[0])
+
+    lines = []
+    rs.fmt_quintile(None, "某欄", lines, mk(10), "ints")
+    check("樣本不足時印『樣本不足』", "樣本不足" in lines[0])
+
+    lines = []
+    rs.fmt_quintile(None, "某欄", lines)          # 未傳 rows/key → 退回舊文案
+    check("未提供 rows/key 時退回樣本不足文案", "樣本不足" in lines[0])
+
+
+def test_committed_report_sections():
+    """已 commit 的報告：九段齊全，且除 R1 外每段都有腳本產出的結論行。
+
+    守的是 f46aaf8 那類回歸——結論行手改進 report.md、腳本沒產出，重跑就消失。
+    """
+    p = Path(__file__).resolve().parent / "report_sorting.md"
+    if not p.exists():
+        check("report_sorting.md 存在", False)
+        return
+    text = p.read_text(encoding="utf-8")
+    blocks = {}
+    cur = None
+    for line in text.split("\n"):
+        if line.startswith("# ") and not line.startswith("# 回測報告"):
+            cur = line[2:].split(".")[0].strip()
+            blocks[cur] = []
+        elif cur:
+            blocks[cur].append(line)
+
+    for sec in ["R1", "R2", "S1", "M1", "M2", "M4", "M3", "S2", "S3"]:
+        check(f"報告含 {sec} 段", sec in blocks)
+    # R1 是 regime 對照表，本來就沒有單一結論行
+    for sec in ["R2", "S1", "M1", "M2", "M4", "M3", "S2", "S3"]:
+        if sec in blocks:
+            check(f"{sec} 段有結論行",
+                  any(l.startswith("**結論**") for l in blocks[sec]))
+
+
 def main():
     for fn in [test_sample_keys_match_builder,
                test_r2_flip, test_r2_no_flip, test_r2_one_side_empty,
@@ -172,7 +295,12 @@ def main():
                test_m4_zero_spread_not_called_insufficient,
                test_m4_truly_insufficient, test_m4_pool_matches_m2_fallback,
                test_m4_threshold_uses_constant, test_tertile_fallback,
-               test_section_conventions]:
+               test_section_conventions,
+               test_build_samples_iterates_codes_in_sorted_order,
+               test_max_tie_rate, test_quintile_blocks_high_tie_column,
+               test_quintile_order_independent_without_ties,
+               test_fmt_quintile_distinguishes_reasons,
+               test_committed_report_sections]:
         print(f"\n--- {fn.__name__} ---")
         fn()
     print(f"\n{'=' * 50}")
