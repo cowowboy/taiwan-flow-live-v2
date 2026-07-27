@@ -1020,7 +1020,11 @@ async function callClaude(key, model, system, userMsg, signal){
     if (!r.ok || (j.type==="error")) throw new Error((j.error && j.error.message) || ("HTTP "+r.status));
     if (j.stop_reason === "refusal") throw new Error("模型基於安全政策婉拒本次請求");
     const text = (j.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
-    return { text, usage: j.usage || null };
+    // adaptive thinking 吃滿 max_tokens 時只回 thinking block、沒有 text block，text 會靜靜落成
+    // 空字串並被上層當成功（2026-07-27 自動場：6 份中 3 份 output=8000/thinking≈8000、text 為空，
+    // 彙總層只好自行宣告「為空白」）。這裡當失敗丟出，讓上層落 ok:false 佔位而非靜默空白。
+    if (!text.trim()) throw new Error("回應無 text 內容（stop_reason="+(j.stop_reason||"?")+"），可能是 thinking 佔滿 max_tokens");
+    return { text, stop_reason: j.stop_reason || null, usage: j.usage || null };
   }catch(e){
     if (e && e.name === "AbortError") throw new Error("已手動中斷");
     throw e;
@@ -1039,7 +1043,7 @@ async function runInsight(){
       + "(4) 每條洞見／建議必須點名個股代號＋可追溯的具體數據依據(集中倍數/貢獻點/連買日/漲跌%等)，禁止空泛臆測。"
       + "(5) 洞見與建議合計不超過 10 條，挑共振最強、依據最紮實的。"
       + "(6) 建議個股以 alpha 為首要考量，優先納入中小型標的；大型權值股(台灣50成分、2330台積電/2317鴻海/2454聯發科、金控股等)合計不得超過清單一半——這是上限而非目標，不必硬湊，中小型訊號更強就多放中小型甚至大型不放。"
-      + "(7) 推薦個股必須有『當日成交量 ≥ 1,000 張』的量能佐證，量能只能引自資料中有標示成交量的段落（如當沖排行的量、鉅額的總量、個股資金集中的量）；若該標的在所有帶量段落都查不到成交量，視為量能未知，一律不得列入推薦。"
+      + "(7) 即時資金流資料無個股級成交量欄位，故個股評選不套用『當日成交量 ≥ 1,000 張』門檻；資料中若有標示成交量的段落（如當沖排行的量、鉅額的總量、個股資金集中的量）仍應優先引用該量能，查不到者視為量能未知，仍可列入推薦但須於該檔標注『量能未知』。"
       + "(8) 資料為盤中準即時快照(約分鐘級、20秒輪詢)，僅反映當下資金分布、非全日定論，判讀須註明時效性。"
       + "(9) 繁體中文、markdown(## 標題、- 清單、**粗體**、可用表格)。"
       + "結構：## 核心洞見與操作建議(≤10 條，每條＝個股代號名稱 ｜ 共振訊號 ｜ 數據依據 ｜ 方向與進出建議；大型股≤一半)／## 訊號邏輯(簡述同向共振推論)。不要有背離段落。"
