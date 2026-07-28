@@ -4,7 +4,7 @@
 # 規格：docs/alpha-sweep-preregistration.md（已 commit、已凍結）。
 #   §1 方法（主要結果變數 e3、不報 p 值、切半驗證、採用門檻、三層報告、多重比較揭露）
 #   §2.1 候選清單 14 列（AS-03/AS-04 為雙邊檢定各計 2 → K=16）
-#   §2.2 已知偏差 4 項（必須寫進報告）
+#   §2.2 已知偏差 4 項＋第 5 項實作揭露（AS-05/06 滾動基準，2026-07-28 驗收要求）
 # **本檔不得自行增刪候選、不得改判準門檻**——那會讓「先註冊後測」失去意義。
 #
 # 沿用既有程式（不重造）：
@@ -13,8 +13,9 @@
 #   run_sorting.stat()/fmt()/monthly() 統計與輸出格式
 #   run_sorting.max_tie_rate()       排序欄平手率診斷（本檔只印診斷，不當判準）
 #
-# 技術指標：Worker 生產實作 worker/src/index.js:1787-1888（sma/ema/kd/macd/rsi/boll）
-# 與其狀態描述 :1898-1931（kdState/macdState/bollState）的 Python 逐行移植。
+# 技術指標：Worker 生產實作 worker/src/index.js 的 sma/ema/kd/macd/rsi/boll
+# 與其狀態描述 kdState/macdState/bollState 的 Python 逐行移植（行號會隨該檔演進，
+# 以函式名為準；撰寫時位於 :1879-1955 與 :1990-2023）。
 # 兩份實作的漂移由 backtest/test_alpha_parity.mjs 守門（node 端跑同一組合成序列，零差異）。
 #
 # 用法：
@@ -57,9 +58,9 @@ SIGNALS = [
     dict(id="AS-04", src="flows 對作", weight=2, dir="both",
          desc="投信買 ∩ 外資賣，強度前 30 名"),
     dict(id="AS-05", src="v2 成交佔比", weight=1, dir="long",
-         desc="佔週變（本週佔比−上週佔比，pp）當日前 10%"),
+         desc="佔週變（本週佔比−上週佔比，pp）當日前 10%［基準採滾動前5交易日，見已知偏差5］"),
     dict(id="AS-06", src="v2 成交佔比", weight=1, dir="short",
-         desc="佔週變當日後 10%"),
+         desc="佔週變當日後 10%［基準採滾動前5交易日，見已知偏差5］"),
     dict(id="AS-07", src="news 個股追蹤", weight=1, dir="long",
          desc="KD(9,3,3) 黃金交叉且 K<50"),
     dict(id="AS-08", src="news 個股追蹤", weight=1, dir="short",
@@ -82,7 +83,8 @@ K_TESTS = sum(s["weight"] for s in SIGNALS)
 
 DIR_LABEL = {"long": "做多", "short": "做空", "both": "雙邊（計 2）"}
 
-# 預註冊書 §2.2 已知偏差（原文摘要，必須印進報告）
+# 前 4 項＝預註冊書 §2.2 原文摘要；第 5 項＝實作層偏離揭露（fresh-context 驗收
+# 1cc5466 的必修項：只寫在程式註解、報告不印，讀者會誤以為測的是生產自然週口徑）
 KNOWN_BIASES = [
     "**外資口徑少一塊**：快取的 inst 只收 `Investment_Trust` + `Foreign_Investor`，"
     "生產的外資＝`Foreign_Investor + Foreign_Dealer_Self`（`taiwan-flows/src/pipeline.py:12`）。"
@@ -92,6 +94,11 @@ KNOWN_BIASES = [
     "**`Trading_Volume` 未存**：快取只有 `Trading_money`（`fetch.py:88`）。"
     "用金額當成交量的代理會失真（金額＝量×均價），所以量能類指標全部不列入第一階段。",
     "**52 週高低暖身不足**：需 ~250 交易日暖身，快取全長僅 255 日，扣掉後只剩約 1 個月可算。排除。",
+    "**AS-05/06 的「上週」基準與生產不同**：生產的佔週變＝當日佔比 − 上一**自然週**"
+    "（週一~五聚合）佔比（`index.html` 佔週變欄，資料鏈 `src/build_lastweek.py`），"
+    "回測快取無自然週聚合，改用**滾動前 5 交易日**佔比為基準；分母亦沿用回測市場總額"
+    "（排除 ETF，不分上市/上櫃）。本報告的 AS-05/06 結論適用於滾動 5 日口徑，"
+    "**不可直接外推到生產的自然週定義**。",
 ]
 
 
@@ -667,7 +674,7 @@ def build_report(days, samples, results, diag, doc_info, dirty):
         "## 對照組基準（§1.1：同流動性、明確無訊號）",
         rs.fmt("對照組 surge<1.2 或 |ret|<1%", rs.stat(ctrl)),
         "",
-        "## 已知偏差（§2.2，必須隨結果一起讀）",
+        "## 已知偏差（1–4＝預註冊 §2.2；5＝實作揭露。必須隨結果一起讀）",
     ]
     for i, b in enumerate(KNOWN_BIASES, 1):
         lines.append(f"{i}. {b}")
@@ -721,8 +728,9 @@ def build_report(days, samples, results, diag, doc_info, dirty):
         "- A 層結果不直接進圖卡規格；每一個要單獨複驗（獨立 subagent、fresh context）後才進（§4.3）。",
         "- 本報告未做分位（quintile）分析：預註冊書未列，臨時加會增加實際檢定次數，"
         "與 §1.7 的多重比較揭露互相矛盾。排序欄只印平手率診斷。",
-        "- 指標定義沿用 Worker 生產純函式（`worker/src/index.js:1787-1888`、狀態描述 :1898-1931）"
-        "的 Python 移植；兩份實作的一致性由 `backtest/test_alpha_parity.mjs` 逐 index 比對守門。",
+        "- 指標定義沿用 Worker 生產純函式（`worker/src/index.js` 的 sma/kd/macd/rsi/boll "
+        "與狀態描述函式，以函式名為準）的 Python 移植；"
+        "兩份實作的一致性由 `backtest/test_alpha_parity.mjs` 逐 index 比對守門。",
     ])
     if opposite:
         lines.append(f"- ⚠ A 層中 {'、'.join(opposite)} 的超額符號與預註冊方向相反。"

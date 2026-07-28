@@ -378,8 +378,13 @@ def test_report_structure():
     check("C 層標題（必須完整列出）", "## C. 陰性" in txt)
     for sig in a.SIGNALS:
         check(f"{sig['id']} 出現在三層總表", f"| {sig['id']} |" in txt)
-    check("印出 4 項已知偏差", all(b.split("：")[0][2:6] in txt for b in a.KNOWN_BIASES))
-    check("已知偏差確為 4 項", len(a.KNOWN_BIASES) == 4)
+    check("印出全部已知偏差", all(b.split("：")[0][2:6] in txt for b in a.KNOWN_BIASES))
+    # 4 項來自預註冊 §2.2，第 5 項是 AS-05/06 滾動基準的實作揭露（驗收 1cc5466 必修）
+    check("已知偏差為 4+1 項", len(a.KNOWN_BIASES) == 5)
+    check("第 5 項揭露滾動基準且警告不可外推",
+          "滾動前 5 交易日" in a.KNOWN_BIASES[4] and "不可直接外推" in a.KNOWN_BIASES[4])
+    check("AS-05/06 定義行標注基準口徑",
+          all("滾動前5交易日" in s["desc"] for s in a.SIGNALS if s["id"] in ("AS-05", "AS-06")))
     check("印出對照組基準", "對照組" in txt)
     check("印出切半方式（依索引）", "依交易日索引對半切" in txt)
     check("印出 e1 只作描述用途", "不列入採用判準" in txt)
