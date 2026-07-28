@@ -1404,6 +1404,423 @@ export async function alertJob(env, tp, tag, text, fetchFn = fetch) {
     return { error: String((e && e.message) || e) };
   }
 }
+// ---- LINE 圖卡資料組裝層（Phase B1，2026-07-28，規格：docs/line-cards-spec.md 第 9 節）----
+// buildDailyCards(src) 純函式：無 fetch、無 KV、無 Date.now（日期一律取各資料源自帶的日期欄）。
+// src＝發送層 fetch 好的 13 支 JSON 物件包：{daysummary, baseline, morning, us, lastweek,
+//   aetfLatest, aetfDiff, flowsLatest, totals, foreignHistory, flowsDaily, postmkt, mktbal,
+//   vix, dateStr}，任何鍵可為 null。回傳 {cards:[卡片資料物件], skipped:[{id,reason}]}。
+// 每張卡獨立組裝、獨立失敗：來源缺欄→該卡進 skipped，絕不擋其他卡。
+// C 類 5 張（FX_BLOCKED_CARDS）與第二期兩張圖表卡（v2-ov-9/10）不在此組——共 33 張。
+
+const FX_ROWS_MAX = 8;
+const fxR1 = (v) => { const s = (Math.round(v * 10) / 10).toFixed(1); return s === "-0.0" ? "0.0" : s; };
+const fxSgn = (v, unit = "") => `${v > 0 ? "+" : ""}${fxR1(v)}${unit}`;
+const fxC = (v) => (v > 0 ? "up" : v < 0 ? "down" : "neutral");
+const fxYiK = (k) => k / 1e5;   // 千元 → 億元
+const fxYi = (v) => v / 1e8;    // 元 → 億元
+const fxNeed = (v, what) => { if (v == null) throw new Error(`${what} 缺`); return v; };
+// 上游生成文案（如 daysummary.tone）可能含 FX_FORBIDDEN 字（實檔 tone 有「貢獻最強」），
+// 卡面前先做同義中性替換，否則 assertCardAllowed 會把整張卡打掉。
+const fxSanitize = (t) => String(t).replaceAll("最強", "最大").replaceAll("最弱", "最小");
+
+// 代號→名稱：flowsDaily／baseline 皆無名稱欄（實檔確認），從其餘來源湊；查不到回退代號。
+export function fxNameMap(s) {
+  const m = new Map();
+  const add = (c, n) => { if (c != null && n && !m.has(String(c))) m.set(String(c), String(n)); };
+  for (const pg of ["foreign", "trust"])
+    for (const k of ["buy_by_amt", "sell_by_amt", "buy_by_chg", "sell_by_chg", "buy_by_vol", "sell_by_vol"])
+      for (const r of (s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages[pg] || {})[k] || []) add(r.code, r.name);
+  for (const r of (s.postmkt && s.postmkt.lending || {}).rows || []) add(r.c, r.n);
+  for (const r of (s.postmkt && s.postmkt.blocktrade || {}).rows || []) add(r.c, r.n);
+  for (const r of (s.aetfDiff || {}).stocks || []) add(r.c, r.n);
+  for (const k of ["stocks_top5", "stocks_bot3"]) for (const r of (s.daysummary || {})[k] || []) add(r.c, r.n);
+  for (const k of ["it3", "it3_sell"]) for (const r of (s.morning && s.morning.chips || {})[k] || []) add(r.c, r.n);
+  return m;
+}
+// flows daily 檔（cols+rows 陣列表）→ 代號索引。cols 見 taiwan-flows CLAUDE.md 尾（張/千元/%）。
+export function fxFlowsIndex(fd) {
+  if (!fd || !Array.isArray(fd.cols) || !Array.isArray(fd.rows)) return null;
+  const ci = {}; fd.cols.forEach((c, i) => { ci[c] = i; });
+  const map = new Map();
+  for (const r of fd.rows) map.set(String(r[ci.code]), r);
+  return { date: fd.date, ci, map,
+    get(code, field) { const r = map.get(String(code)); const i = ci[field];
+      return r && i != null ? r[i] : null; } };
+}
+// Regime 判定（規格 9.1.6）：totals.rows[date].taiex 取最近 20 個非 null 值算 MA（含最新日），
+// 收盤>MA=bull。資料不足 20 筆→視為 bull（保守：不抑制）並由卡 note 標「regime 未判定」。
+export function fxRegime(totals) {
+  const dates = (totals && totals.dates) || [];
+  const vals = [];
+  for (const d of dates) {
+    const v = totals && totals.rows && totals.rows[d] ? totals.rows[d].taiex : null;
+    if (v != null) vals.push(v);
+  }
+  const w = vals.slice(-20);
+  if (w.length < 20) return { regime: "bull", undetermined: true };
+  const ma = w.reduce((a, b) => a + b, 0) / w.length;
+  return { regime: w[w.length - 1] > ma ? "bull" : "bear", undetermined: false };
+}
+const fxRegimeNote = (ctx) => ctx.regime.undetermined
+  ? "regime 未判定（TAIEX 有效序列不足 20 筆，保守視為多頭不抑制）" : null;
+
+// ---- 訊號卡 6 張（baseline.json；stocks: [a5,it,fi,y1,y2,ints,nl,its,nh,a20]、
+//      subs_y: {sub:[y1,y2,C,R]}——Phase A 後 schema，src/build_baseline.py:4-22）----
+function fxCardSubSurge(s, ctx) {   // 卡1 次產業湧入：subs_y y1==1，依 R 降序（分離度 0.97%）
+  if (ctx.regime.regime === "bear") return { skip: "regime-bear" };
+  const b = fxNeed(s.baseline, "baseline");
+  const subs = Object.entries(b.subs_y || {}).filter(([, v]) => v && v[0] === 1);
+  if (!subs.length) return { skip: "今日無次產業湧入訊號" };
+  subs.sort((a, b2) => ((b2[1][3] ?? -Infinity) - (a[1][3] ?? -Infinity)));
+  const rows = subs.slice(0, FX_ROWS_MAX).map(([n, v]) => ({ m: n,
+    r: v[3] == null ? "R —" : `R ${fxSgn(v[3] * 100, "%")}`, c: v[3] == null ? "neutral" : fxC(v[3]) }));
+  return { title: "次產業湧入", sub: `資料日 ${b.date}`, rows,
+    note: ["依成員等權漲跌 R 降序，歷史分離度 0.97%、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
+}
+function fxCardDualBuy(s, ctx) {    // 卡2 土洋同買：y1==1 ∩ it≥2 ∩ fi≥2，依 flowsDaily f_amt 降序
+  if (ctx.regime.regime === "bear") return { skip: "regime-bear" };
+  const b = fxNeed(s.baseline, "baseline");
+  const fl = fxNeed(ctx.flows, "flowsDaily");
+  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === 1 && a[1] >= 2 && a[2] >= 2);
+  if (!hits.length) return { skip: "今日無土洋同買訊號" };
+  const list = hits.map(([c]) => ({ c, f: fl.get(c, "f_amt") }));
+  list.sort((a, b2) => ((b2.f ?? -Infinity) - (a.f ?? -Infinity)));
+  const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: ctx.names.get(o.c) || o.c,
+    r: o.f == null ? "—" : fxSgn(fxYiK(o.f), "億"), c: o.f == null ? "neutral" : fxC(o.f) }));
+  return { title: "土洋同買", sub: `資料日 ${b.date}`, rows,
+    note: ["依外資當日買超金額降序（歷史 Q1 中位數 +1.74%）、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
+}
+function fxCardNewHigh(s, ctx) {    // 卡3 突破新高：nh==1，依法人買強度 ints 降序（分離度 0.92%）
+  const b = fxNeed(s.baseline, "baseline");
+  const entries = Object.entries(b.stocks || {});
+  if (!entries.some(([, a]) => Array.isArray(a) && a.length >= 9))
+    throw new Error("baseline 缺 nh 欄（Phase A schema 未落地）");
+  const hits = entries.filter(([, a]) => a && a[8] === 1);
+  if (!hits.length) return { skip: "今日無突破20日新高" };
+  hits.sort((x, y) => ((y[1][5] ?? -Infinity) - (x[1][5] ?? -Infinity)));
+  const rows = hits.slice(0, FX_ROWS_MAX).map(([c, a]) => ({ l: c, m: ctx.names.get(c) || c,
+    r: `強度 ${fxSgn(a[5], "%")}`, c: fxC(a[5]) }));
+  return { title: "突破新高", sub: `資料日 ${b.date}`, rows,
+    note: "依法人買強度降序，歷史分離度 0.92%、非單調",
+    foot: "母體歷史 T+3 超額為負（勝大盤僅 41.7%）——本卡僅記錄突破事實，不構成偏多解讀" };
+}
+function fxCardNewLow(s, ctx) {     // 卡4 弱勢榜：nl==1，依量能趨勢 a5/a20 降序（分離度 0.45%）
+  const b = fxNeed(s.baseline, "baseline");
+  const entries = Object.entries(b.stocks || {});
+  if (!entries.some(([, a]) => Array.isArray(a) && a.length >= 10))
+    throw new Error("baseline 缺 a20 欄（Phase A schema 未落地）");
+  const hits = entries.filter(([, a]) => a && a[6] === 1);
+  if (!hits.length) return { skip: "今日無跌破20日新低" };
+  const list = hits.map(([c, a]) => ({ c, v: a[9] > 0 ? a[0] / a[9] : null }));
+  list.sort((x, y) => ((y.v ?? -Infinity) - (x.v ?? -Infinity)));
+  const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: ctx.names.get(o.c) || o.c,
+    r: o.v == null ? "量能 —" : `量能 ${fxR1(o.v)}x`, c: "neutral" }));
+  return { title: "弱勢榜（跌破20日新低）", sub: `資料日 ${b.date}`, rows,
+    note: "依量能趨勢（5日均額/20日均額）降序，歷史分離度 0.45%、非單調；未排除跌停鎖死（缺漲跌停資料）" };
+}
+function fxCardExitSell(s, ctx) {   // 卡5 退出＋法人賣：y1==-1 ∩ ints<-5%，不排序（回測：候選欄無效）
+  const b = fxNeed(s.baseline, "baseline");
+  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === -1 && a[5] < -5);
+  if (!hits.length) return { skip: "今日無退出＋法人賣訊號" };
+  hits.sort((x, y) => x[0].localeCompare(y[0]));   // 僅為輸出確定性依代號排列，非強弱排序
+  const rows = hits.slice(0, FX_ROWS_MAX).map(([c, a]) => ({ l: c, m: ctx.names.get(c) || c,
+    r: `強度 ${fxSgn(a[5], "%")}`, c: fxC(a[5]) }));
+  return { title: "退出＋法人賣", sub: `資料日 ${b.date}`, rows,
+    note: "本卡不排序（候選排序欄回測無效），依代號排列，順序不含強弱意義" };
+}
+function fxCardSurgeWarn(s, ctx) {  // 卡6 追高警示：y1==1，S=當日成交額/5日均額 降序呈現
+  const b = fxNeed(s.baseline, "baseline");
+  const fl = fxNeed(ctx.flows, "flowsDaily");
+  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === 1);
+  if (!hits.length) return { skip: "今日無爆量大漲訊號" };
+  const list = hits.map(([c, a]) => {
+    const amt = fl.get(c, "amt");   // 千元；a5 為元 → S = amt*1000/a5
+    return { c, s: amt != null && a[0] > 0 ? amt * 1000 / a[0] : null };
+  });
+  list.sort((x, y) => ((y.s ?? -Infinity) - (x.s ?? -Infinity)));
+  const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: ctx.names.get(o.c) || o.c,
+    r: o.s == null ? "S —" : `S ${fxR1(o.s)}x`, c: "neutral" }));
+  return { title: "追高警示（爆量大漲）", sub: `資料日 ${b.date}`, rows,
+    note: "S 值（當日成交額/5日均額）降序呈現，僅為排列依據、不代表強弱；未排除漲停鎖死（缺漲跌停資料）" };
+}
+
+// ---- A 類·純描述（daysummary／morning／us／flows／postmkt／mktbal）----
+const fxPtsRow = (r) => ({ ...(r.c != null ? { l: r.c } : {}), m: r.n, r: fxSgn(r.pts, "點"), c: fxC(r.pts) });
+function fxCardGlobal(s) {          // v2-global-1 市場指數＋VIX（vix null 顯「—」不擋卡）
+  const d = fxNeed(s.daysummary, "daysummary");
+  const ix = fxNeed(d.index, "daysummary.index");
+  const vix = s.vix == null ? null : (typeof s.vix === "object" ? s.vix.vix : s.vix);
+  const rows = [];
+  if (ix.tse) rows.push({ m: "加權指數", r: `${ix.tse.val}（${fxSgn(ix.tse.chg, "%")}）`, c: fxC(ix.tse.chg) });
+  if (ix.otc) rows.push({ m: "櫃買指數", r: `${ix.otc.val}（${fxSgn(ix.otc.chg, "%")}）`, c: fxC(ix.otc.chg) });
+  if (ix.tse && ix.tse.amt_yi != null) rows.push({ m: "成交值(加權)", r: `${fxR1(ix.tse.amt_yi)}億`, c: "neutral" });
+  if (!rows.length) throw new Error("daysummary.index 欄缺");
+  rows.push({ m: "VIX", r: vix == null ? "—" : fxR1(vix), c: "neutral" });
+  return { title: "市場指數", sub: `資料日 ${d.date}`, rows };
+}
+function fxCardOv1(s) {             // v2-ov-1 今日總結
+  const d = fxNeed(s.daysummary, "daysummary");
+  const ix = fxNeed(d.index, "daysummary.index"); const br = fxNeed(d.breadth, "daysummary.breadth");
+  return { title: "今日總結", sub: `資料日 ${d.date}`, rows: [
+    { m: "加權", r: `${fxSgn(ix.tse.chgP, "點")}（${fxSgn(ix.tse.chg, "%")}）`, c: fxC(ix.tse.chg) },
+    { m: "櫃買", r: `${fxSgn(ix.otc.chgP, "點")}（${fxSgn(ix.otc.chg, "%")}）`, c: fxC(ix.otc.chg) },
+    { m: "漲跌家數", r: `漲${br.up}／跌${br.down}`, c: "neutral" },
+  ] };
+}
+function fxCardOv5(s) {             // v2-ov-5 規則式定調句
+  const d = fxNeed(s.daysummary, "daysummary");
+  return { title: "今日定調", sub: `資料日 ${d.date}`, paras: [fxSanitize(fxNeed(d.tone, "daysummary.tone"))] };
+}
+function fxCardOv6(s) {             // v2-ov-6 貢獻點發散·次產業
+  const d = fxNeed(s.daysummary, "daysummary");
+  const rows = [...(fxNeed(d.subs_top5, "daysummary.subs_top5")).slice(0, 5), ...(d.subs_bot3 || []).slice(0, 3)].map(fxPtsRow);
+  if (!rows.length) throw new Error("subs_top5/subs_bot3 空");
+  return { title: "指數貢獻·次產業", sub: `資料日 ${d.date}`, rows, note: "貢獻點＝權重×漲跌的會計分解，全市場加總＝指數漲跌點" };
+}
+function fxCardOv7(s) {             // v2-ov-7 貢獻點發散·產業鏈（daysummary Phase A 補欄）
+  const d = fxNeed(s.daysummary, "daysummary");
+  const rows = [...(fxNeed(d.chain_top5, "daysummary.chain_top5（Phase A 欄）")).slice(0, 5), ...(d.chain_bot3 || []).slice(0, 3)].map(fxPtsRow);
+  if (!rows.length) throw new Error("chain_top5/chain_bot3 空");
+  return { title: "指數貢獻·產業鏈", sub: `資料日 ${d.date}`, rows, note: "產業鏈為多對多分類，跨產業有重疊、不可加總" };
+}
+function fxCardOv8(s) {             // v2-ov-8 貢獻點發散·個股
+  const d = fxNeed(s.daysummary, "daysummary");
+  const rows = [...(fxNeed(d.stocks_top5, "daysummary.stocks_top5")).slice(0, 5), ...(d.stocks_bot3 || []).slice(0, 3)].map(fxPtsRow);
+  if (!rows.length) throw new Error("stocks_top5/stocks_bot3 空");
+  return { title: "指數貢獻·個股", sub: `資料日 ${d.date}`, rows, note: "貢獻點＝權重×漲跌的會計分解" };
+}
+function fxCardOv14(s) {            // v2-ov-14 次產業強弱總表 前10（daysummary Phase A 補欄 subs_all）
+  const d = fxNeed(s.daysummary, "daysummary");
+  const all = fxNeed(d.subs_all, "daysummary.subs_all（Phase A 欄）");
+  if (!all.length) throw new Error("subs_all 空");
+  const rows = all.slice(0, 10).map((r) => ({ m: r.n, r: `${fxSgn(r.pts, "點")}｜佔比${fxR1(r.share_pct)}%`, c: fxC(r.pts) }));
+  return { title: "次產業總表（前10）", sub: `資料日 ${d.date}`, rows, note: "依貢獻點降序節錄前 10" };
+}
+function fxCardChain1(s) {          // v2-chain-1 產業鏈排行
+  const d = fxNeed(s.daysummary, "daysummary");
+  const rows = [...(fxNeed(d.chain_top5, "daysummary.chain_top5（Phase A 欄）")).slice(0, 5), ...(d.chain_bot3 || []).slice(0, 3)]
+    .map((r) => ({ m: r.n, r: `${fxR1(r.amt_yi)}億（${fxSgn(r.pts, "點")}）`, c: fxC(r.pts) }));
+  if (!rows.length) throw new Error("chain_top5/chain_bot3 空");
+  return { title: "產業鏈排行", sub: `資料日 ${d.date}`, rows,
+    note: "多對多分類，金額跨產業重疊、≠大盤、不可讀成市佔；不含 ETF" };
+}
+function fxCardFlowsHdr1(s) {       // flows-hdr-1 三大法人（totals 末日 tse+otc 自加合計）
+  const t = fxNeed(s.totals, "totals");
+  const d = fxNeed((t.dates || [])[(t.dates || []).length - 1], "totals.dates");
+  const row = fxNeed(t.rows && t.rows[d], "totals.rows 末日");
+  const sum = (f) => {
+    const a = row.tse ? row.tse[f] : null, b = row.otc ? row.otc[f] : null;
+    return a == null && b == null ? null : (a || 0) + (b || 0);
+  };
+  const rows = [["外資", "f_net_k"], ["投信", "t_net_k"], ["自營", "d_net_k"]].map(([n, f]) => {
+    const v = sum(f);
+    return { m: n, r: v == null ? "—" : fxSgn(fxYiK(v), "億"), c: v == null ? "neutral" : fxC(v) };
+  });
+  return { title: "三大法人買賣超（上市＋上櫃）", sub: `資料日 ${d}`, rows };
+}
+function fxCardFlowsHdr2(s) {       // flows-hdr-2 台指期外資未平倉
+  const fc = fxNeed(s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages.foreign
+    && s.flowsLatest.pages.foreign.futures_card, "flowsLatest pages.foreign.futures_card");
+  const rows = [{ m: "外資台指期未平倉淨額", r: `${fc.oi_net_lots > 0 ? "+" : ""}${fc.oi_net_lots}口`, c: fxC(fc.oi_net_lots) }];
+  if (fc.vs_prev_month_lots != null)
+    rows.push({ m: `較上月底（${fc.prev_month_end || "—"}）`, r: `${fc.vs_prev_month_lots > 0 ? "+" : ""}${fc.vs_prev_month_lots}口`, c: fxC(fc.vs_prev_month_lots) });
+  return { title: "台指期外資未平倉", sub: `資料日 ${fc.date}`, rows };
+}
+function fxCardFlowsEtf1(s) {       // flows-etf-1 ETF 概況三組
+  const st = fxNeed(s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages.etf
+    && s.flowsLatest.pages.etf.stats, "flowsLatest pages.etf.stats");
+  const rows = [["全部", "all"], ["股票型", "nonbond"], ["債券型", "bond"]].flatMap(([n, k]) => {
+    const o = st[k]; if (!o) return [];
+    return [{ m: `${n}（${o.count}檔）`, r: `市值${Math.round(fxYiK(o.mktcap_k))}億｜外資${fxSgn(fxYiK(o.f_amt_k), "億")}`, c: fxC(o.f_amt_k) }];
+  });
+  if (!rows.length) throw new Error("etf.stats 空");
+  return { title: "ETF 概況", sub: `資料日 ${s.flowsLatest.date}`, rows, note: "外資＝當日買賣超金額" };
+}
+function fxCardFF1(s) {             // flows-ff-1 外資買賣超近 5 日＋本週
+  const fh = fxNeed(s.foreignHistory, "foreignHistory");
+  const daily = fxNeed(fh.daily, "foreignHistory.daily");
+  const dates = Object.keys(daily).sort();
+  if (!dates.length) throw new Error("foreignHistory.daily 空");
+  const net = (d) => (((daily[d].tse || {}).net_k || 0) + ((daily[d].otc || {}).net_k || 0));
+  const rows = dates.slice(-5).reverse().map((d) => ({ m: d.slice(5), r: fxSgn(fxYiK(net(d)), "億"), c: fxC(net(d)) }));
+  const latest = fh.latest_date || dates[dates.length - 1];
+  const dt = new Date(`${latest}T00:00:00Z`);
+  const mon = new Date(dt.getTime() - ((dt.getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+  const wk = dates.filter((d) => d >= mon && d <= latest);
+  const wsum = wk.reduce((a, d) => a + net(d), 0);
+  rows.push({ m: `本週累計（${wk.length}日）`, r: fxSgn(fxYiK(wsum), "億"), c: fxC(wsum) });
+  return { title: "外資買賣超近期", sub: `資料日 ${latest}`, rows, note: "合計＝上市＋上櫃" };
+}
+function fxCardBlock1(s) {          // pm-block-1 鉅額交易前 5 組
+  const bt = fxNeed(s.postmkt && s.postmkt.blocktrade, "postmkt.blocktrade");
+  const rows = (bt.rows || []).slice(0, 5).map((r) => ({ l: r.c, m: `${r.n}｜${r.type || ""}`,
+    r: `${fxR1(fxYi(r.money))}億`, c: "neutral" }));
+  if (!rows.length) return { skip: "本日無鉅額交易" };
+  return { title: "鉅額交易", sub: `資料日 ${bt.date}`, rows, note: "逐筆前 5 組（依原始序），金額＝成交值" };
+}
+function fxCardMktbal1(s) {         // pm-mktbal-1 大盤融資餘額（末筆＋前筆差，帶資料日標註）
+  const m = fxNeed(s.mktbal, "mktbal");
+  const dl = fxNeed(m.daily, "mktbal.daily");
+  if (!dl.length) throw new Error("mktbal.daily 空");
+  const cur = dl[dl.length - 1], prev = dl.length > 1 ? dl[dl.length - 2] : null;
+  const rows = [{ m: "融資餘額", r: `${fxR1(fxYi(fxNeed(cur.margin_money, "margin_money")))}億`, c: "neutral" }];
+  if (prev && prev.margin_money != null) {
+    const df = fxYi(cur.margin_money - prev.margin_money);
+    rows.push({ m: `較前日（${String(prev.date).slice(5)}）`, r: fxSgn(df, "億"), c: fxC(df) });
+  }
+  return { title: "大盤融資餘額", sub: `資料日 ${cur.date}`, rows };
+}
+function fxCardMktbal2(s) {         // pm-mktbal-2 大盤借賣餘額（sbl_short；末筆＋前筆差，帶資料日標註）
+  const m = fxNeed(s.mktbal, "mktbal");
+  const dl = fxNeed(m.daily, "mktbal.daily");
+  if (!dl.length) throw new Error("mktbal.daily 空");
+  const cur = dl[dl.length - 1], prev = dl.length > 1 ? dl[dl.length - 2] : null;
+  const rows = [{ m: "借賣餘額市值", r: `${fxR1(fxYi(fxNeed(cur.sbl_short_value, "sbl_short_value")))}億`, c: "neutral" }];
+  if (prev && prev.sbl_short_value != null) {
+    const df = fxYi(cur.sbl_short_value - prev.sbl_short_value);
+    rows.push({ m: `較前日（${String(prev.date).slice(5)}）`, r: fxSgn(df, "億"), c: fxC(df) });
+  }
+  return { title: "大盤借賣餘額", sub: `資料日 ${cur.date}`, rows, note: "借賣＝借券後已於市場放空的餘額（sbl_short）" };
+}
+function fxCardMorning2(s) {        // news-morning-2 籌碼備忘（morning.chips，標 D-1）
+  const ch = fxNeed(s.morning && s.morning.chips, "morning.chips");
+  const inst = ch.inst || {};
+  const rows = [["外資", inst.foreign], ["投信", inst.trust], ["自營", inst.dealer]]
+    .filter(([, v]) => v != null).map(([n, v]) => ({ m: n, r: fxSgn(v, "億"), c: fxC(v) }));
+  const paras = [];
+  if ((ch.it3 || []).length) paras.push(`投信連3買：${ch.it3.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
+  if ((ch.it3_sell || []).length) paras.push(`投信連3賣：${ch.it3_sell.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
+  for (const t of ch.aetf || []) paras.push(fxSanitize(t));
+  if (!rows.length && !paras.length) throw new Error("morning.chips 欄空");
+  return { title: "籌碼備忘", sub: `資料日 ${inst.date || ch.aetf_date || "—"}（D-1）`, rows, paras };
+}
+function fxCardMorning3(s) {        // news-morning-3 昨日資金流向（同 ov-1 來源、晨報版型）
+  const d = fxNeed(s.daysummary, "daysummary");
+  const ix = fxNeed(d.index, "daysummary.index");
+  const rows = [
+    { m: "加權", r: fxSgn(ix.tse.chg, "%"), c: fxC(ix.tse.chg) },
+    { m: "櫃買", r: fxSgn(ix.otc.chg, "%"), c: fxC(ix.otc.chg) },
+  ];
+  const paras = [];
+  if (d.share_top) paras.push(`成交佔比最高：${d.share_top.n}（${fxR1(d.share_top.share_pct)}%）`);
+  if (d.pts_top) paras.push(`正貢獻最大：${d.pts_top.n}（${fxSgn(d.pts_top.pts, "點")}）`);
+  return { title: "昨日資金流向", sub: `資料日 ${d.date}`, rows, paras };
+}
+function fxCardMorning4(s) {        // news-morning-4 美股速覽（us.brief＋指數群組）
+  const u = fxNeed(s.us, "us");
+  const paras = u.brief ? [fxSanitize(u.brief)] : [];
+  const g = (u.groups || []).find((x) => x.g === "指數");
+  const rows = ((g && g.rows) || []).slice(0, 5).map((r) => ({ m: r.n, r: fxSgn(r.chg, "%"), c: fxC(r.chg) }));
+  if (!paras.length && !rows.length) throw new Error("us.brief/groups 空");
+  return { title: "美股速覽", sub: `資料日 ${u.date}（美東）`, rows, paras };
+}
+
+// ---- B 類·排行榜（note 必標排序欄位，無強弱形容詞——規格 3B.2）----
+function fxCardRank1(s, ctx) {      // v2-rank-1 全市場成交佔比 vs 上週（lastweek.json）
+  const fl = fxNeed(ctx.flows, "flowsDaily");
+  let tot = 0;
+  for (const r of fl.map.values()) tot += r[fl.ci.amt] || 0;
+  if (!(tot > 0)) throw new Error("flowsDaily amt 總額為 0");
+  const lw = s.lastweek;
+  const lwTot = lw && lw.tot ? (lw.tot.twse || 0) + (lw.tot.tpex || 0) : 0;
+  const list = [];
+  for (const [c, r] of fl.map) list.push({ c, sh: (r[fl.ci.amt] || 0) / tot * 100 });
+  list.sort((a, b) => b.sh - a.sh);
+  const rows = list.slice(0, FX_ROWS_MAX).map((o) => {
+    const lwSh = lw && lw.stocks && lw.stocks[o.c] != null && lwTot > 0 ? lw.stocks[o.c] / lwTot * 100 : null;
+    return { l: o.c, m: ctx.names.get(o.c) || o.c,
+      r: `${fxR1(o.sh)}%${lwSh == null ? "" : `（上週 ${fxR1(lwSh)}%）`}`,
+      c: lwSh == null ? "neutral" : fxC(o.sh - lwSh) };
+  });
+  return { title: "全市場成交佔比", sub: `資料日 ${fl.date}`, rows,
+    note: "依本日成交佔比降序；括號＝上週全週佔比，顏色＝佔比較上週增減" };
+}
+function fxCardInstRank(s, key, label) {  // flows-foreign-1／flows-trust-1 買賣超排行·依金額
+  const pg = fxNeed(s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages[key], `flowsLatest pages.${key}`);
+  const buy = (pg.buy_by_amt || []).slice(0, 5), sell = (pg.sell_by_amt || []).slice(0, 5);
+  if (!buy.length && !sell.length) throw new Error(`${key} buy_by_amt/sell_by_amt 空`);
+  const mk = (r) => ({ l: r.code, m: r.name, r: fxSgn(fxYiK(r.net_amt_k), "億"), c: fxC(r.net_amt_k) });
+  return { title: `${label}買賣超排行`, sub: `資料日 ${s.flowsLatest.date}`,
+    rows: [...buy.map(mk), ...sell.map(mk)], note: `依${label}買超／賣超金額（net_amt_k）各自降序，買超在前` };
+}
+function fxCardAetf2(s) {           // pm-aetf-2 主動ETF 總覽（aetfDiff.etfs）
+  const e = fxNeed(s.aetfDiff && s.aetfDiff.etfs, "aetfDiff.etfs");
+  const list = Object.entries(e).map(([c, o]) => ({ c, n: o.name || c,
+    aum: o.twse_aum_yi != null ? o.twse_aum_yi : (o.aum != null ? fxYi(o.aum) : null),
+    nb: o.n_buy || 0, ns: o.n_sell || 0 })).filter((o) => o.aum != null);
+  if (!list.length) throw new Error("aetfDiff.etfs 規模欄全空");
+  list.sort((a, b) => b.aum - a.aum);
+  const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: o.n,
+    r: `${fxR1(o.aum)}億｜加${o.nb}/減${o.ns}`, c: "neutral" }));
+  return { title: "主動ETF 總覽", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, rows,
+    note: "依上市規模（twse_aum_yi）降序；加/減＝當日加減碼檔數" };
+}
+function fxCardAetf4(s) {           // pm-aetf-4 主動ETF 加減碼明細（aetfDiff.stocks zh/val）
+  const st = fxNeed(s.aetfDiff && s.aetfDiff.stocks, "aetfDiff.stocks");
+  const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0)).slice(0, 4);
+  const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0)).slice(0, 4);
+  if (!up.length && !dn.length) return { skip: "本日無主動ETF加減碼" };
+  const mk = (o) => ({ l: o.c, m: o.n || o.c,
+    r: `${fxSgn(fxYi(o.val || 0), "億")}（${o.zh > 0 ? "+" : ""}${o.zh}張）`, c: fxC(o.val || 0) });
+  return { title: "主動ETF 加減碼明細", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`,
+    rows: [...up.map(mk), ...dn.map(mk)], note: "依加減碼金額（val）排序：加碼前 4、減碼前 4" };
+}
+function fxCardAetf5(s) {           // pm-aetf-5 主動ETF 進出個股（依 zh 正負分組）
+  const st = fxNeed(s.aetfDiff && s.aetfDiff.stocks, "aetfDiff.stocks");
+  const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0));
+  const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0));
+  if (!up.length && !dn.length) return { skip: "本日無主動ETF進出個股" };
+  const paras = [];
+  if (up.length) paras.push(`加碼（${up.length}檔）：${up.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
+  if (dn.length) paras.push(`減碼（${dn.length}檔）：${dn.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
+  return { title: "主動ETF 進出個股", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, paras,
+    note: "依持股張數變化（zh）正負分組，組內依金額（val）降序" };
+}
+function fxCardLending(s, field, title, fieldLabel) {   // pm-lending-3/4/6 共用（單位：張）
+  const ld = fxNeed(s.postmkt && s.postmkt.lending, "postmkt.lending");
+  const list = (ld.rows || []).filter((r) => r && r[field] != null);
+  if (!list.length) throw new Error(`lending.${field} 空`);
+  list.sort((a, b) => (b[field] || 0) - (a[field] || 0));
+  const rows = list.slice(0, 5).map((r) => ({ l: r.c, m: r.n || r.c,
+    r: `${fxR1((r[field] || 0) / 1e4)}萬張`, c: "neutral" }));
+  return { title, sub: `資料日 ${ld.date}`, rows, note: `依${fieldLabel}（${field}）降序` };
+}
+
+// 33 張逐卡建構表（id → builder）。順序＝規格 3B.5 主題分組的粗排；C 類 5 張與
+// 第二期圖表卡（v2-ov-9/10）不在表內。
+export const FX_CARD_BUILDERS = [
+  ["sig-sub-surge", fxCardSubSurge], ["sig-dual-buy", fxCardDualBuy],
+  ["sig-new-high", fxCardNewHigh], ["sig-new-low", fxCardNewLow],
+  ["sig-exit-sell", fxCardExitSell], ["sig-surge-warn", fxCardSurgeWarn],
+  ["v2-global-1", fxCardGlobal], ["v2-ov-1", fxCardOv1], ["v2-ov-5", fxCardOv5],
+  ["v2-ov-6", fxCardOv6], ["v2-ov-7", fxCardOv7], ["v2-ov-8", fxCardOv8],
+  ["v2-ov-14", fxCardOv14], ["v2-chain-1", fxCardChain1],
+  ["flows-hdr-1", fxCardFlowsHdr1], ["flows-hdr-2", fxCardFlowsHdr2],
+  ["flows-etf-1", fxCardFlowsEtf1], ["flows-ff-1", fxCardFF1],
+  ["pm-block-1", fxCardBlock1], ["pm-mktbal-1", fxCardMktbal1], ["pm-mktbal-2", fxCardMktbal2],
+  ["news-morning-2", fxCardMorning2], ["news-morning-3", fxCardMorning3], ["news-morning-4", fxCardMorning4],
+  ["v2-rank-1", fxCardRank1],
+  ["flows-foreign-1", (s) => fxCardInstRank(s, "foreign", "外資")],
+  ["flows-trust-1", (s) => fxCardInstRank(s, "trust", "投信")],
+  ["pm-aetf-2", fxCardAetf2], ["pm-aetf-4", fxCardAetf4], ["pm-aetf-5", fxCardAetf5],
+  ["pm-lending-3", (s) => fxCardLending(s, "plat_total", "券商借券餘額排行", "兩平台借券餘額")],
+  ["pm-lending-4", (s) => fxCardLending(s, "sbl_short_bal", "借賣餘額排行", "借賣餘額")],
+  ["pm-lending-6", (s) => fxCardLending(s, "margin_bal", "融資餘額排行", "融資餘額")],
+];
+export function buildDailyCards(src) {
+  const s = src || {};
+  const ctx = { names: fxNameMap(s), regime: fxRegime(s.totals), flows: fxFlowsIndex(s.flowsDaily) };
+  const cards = [], skipped = [];
+  for (const [id, fn] of FX_CARD_BUILDERS) {
+    try {
+      const card = fn(s, ctx);
+      if (card && card.skip) { skipped.push({ id, reason: card.skip }); continue; }
+      cards.push({ id, ...card });
+    } catch (e) { skipped.push({ id, reason: String((e && e.message) || e) }); }
+  }
+  return { cards, skipped };
+}
+
 // /line/webhook：LINE 平台事件進來時擷取 source.userId 存 KV（單 key line:uid，變化才寫）。
 // 僅用於「一次性取 userId」設定 LINE_USER_ID；不驗 x-line-signature（簽章需 channel secret，
 // 為降低設定步驟省略）——取得 userId 後可關閉 LINE 平台 webhook，此端點平時收不到流量。
