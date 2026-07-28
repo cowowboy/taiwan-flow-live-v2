@@ -137,7 +137,19 @@ def diff_one(code: str, cur: dict, prv: dict, closes: dict,
         if raw_sig:
             rzh = round(rsh / 1000) or (1 if rsh > 0 else -1)
             rval = round(rsh * px) if px else None
-        rows.append({"c": c, "n": name, "zh": zh, "val": val, "rzh": rzh, "rval": rval})
+        # 持股型態分類（依前後快照「原始股數」，與噪音門檻/主動純額無關）：
+        #   new=前0→今>0、exit=前>0→今0、add/cut=前後皆持有的增/減
+        if sh1 > 0 and sh0 <= 0:
+            k = "new"
+        elif sh0 > 0 and sh1 <= 0:
+            k = "exit"
+        elif sh1 > sh0:
+            k = "add"
+        elif sh1 < sh0:
+            k = "cut"
+        else:  # 股數相同（如僅 raw 變動或 ratio 造成的主動Δ）→ 依變動方向歸增減
+            k = "add" if (d or rsh) > 0 else "cut"
+        rows.append({"c": c, "n": name, "zh": zh, "val": val, "rzh": rzh, "rval": rval, "k": k})
     # 申贖現金流估算：(申贖比-1) × 前日持股市值加總（FinMind 無 units，改由 ratio 推）
     est_flow = None
     aum0 = sum(s0[c][0] * closes[c] for c in s0 if closes.get(c))
