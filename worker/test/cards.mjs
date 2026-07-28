@@ -3,7 +3,7 @@
 // 守的規格：docs/line-cards-spec.md 第 2 節（Flex 硬限制）、第 4 節（誠實原則）、
 //           3B.3（C 類白名單）、第 6 節驗收條件。
 import { lineRequest, cardBubble, disclaimerBubble, buildCardCarousels,
-  cardsFallbackText, FX_FORBIDDEN, FX_BLOCKED_CARDS, FX_COLORS } from "../src/index.js";
+  cardsFallbackText, assertCardAllowed, FX_FORBIDDEN, FX_BLOCKED_CARDS, FX_COLORS } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -103,12 +103,65 @@ const mkCard = (i) => ({
   chk("超過 5 message 上限拋錯", threw);
 }
 
-// ---- bubble 30KB 上限 ----
+// ---- bubble 30KB 上限（UTF-8 位元組，非字元數）----
 {
   let threw = null;
   const big = { id: "big", title: "大", paras: [ "x".repeat(31000) ] };
   try { cardBubble(big); } catch (e) { threw = e.message; }
   chk("單 bubble >30KB 拋錯", threw && threw.includes("30KB"), threw);
+  // 全中文：11,000 字元 ≈ 33KB UTF-8——字元數守門會放行、位元組守門必須擋
+  threw = null;
+  const zh = { id: "zh", title: "中文", paras: [ "中".repeat(11000) ] };
+  try { cardBubble(zh); } catch (e) { threw = e.message; }
+  chk("全中文 33KB（字元數僅 1.1 萬）也被擋", threw && threw.includes("30KB"), threw);
+  chk("錯誤訊息標明 UTF-8", threw && threw.includes("UTF-8"), threw);
+}
+
+// ---- 禁用字全清單逐詞驗擋（不只驗成員，實走建構路徑）----
+{
+  let blocked = 0;
+  for (const w of FX_FORBIDDEN) {
+    try { cardBubble({ id: "fw", title: `xx${w}yy`, paras: [] }); }
+    catch { blocked++; }
+  }
+  chk(`FX_FORBIDDEN 全部 ${FX_FORBIDDEN.length} 詞逐一擋下`, blocked === FX_FORBIDDEN.length,
+    `擋下 ${blocked}/${FX_FORBIDDEN.length}`);
+  let threw = false;
+  try { cardBubble({ id: "sp", title: "Top 1 股票", paras: [] }); } catch { threw = true; }
+  chk("「Top 1」含空格變體被擋", threw);
+}
+
+// ---- 降級版同樣過守門（違規內容不得從任何通道漏出）----
+{
+  let threw = false;
+  try { cardsFallbackText([{ id: "flows-sync-1", title: "x", paras: [] }], "07-28"); }
+  catch { threw = true; }
+  chk("降級版擋 C 類卡", threw);
+  threw = false;
+  try { cardsFallbackText([{ id: "fw", title: "本週最強", paras: [] }], "07-28"); }
+  catch { threw = true; }
+  chk("降級版擋禁用字", threw);
+  chk("assertCardAllowed 可獨立供發送層預過濾", typeof assertCardAllowed === "function");
+}
+
+// ---- 行為釘住：空陣列與 12 倍數切分 ----
+{
+  const empty = buildCardCarousels([], "alt");
+  chk("空 cards → 1 message 僅免責卡（發送層應先判空跳過）",
+    empty.length === 1 && empty[0].contents.contents.length === 1);
+  const m12 = buildCardCarousels(Array.from({ length: 12 }, (_, i) => mkCard(i)), "alt");
+  chk("恰 12 卡 → 12/1（免責卡單獨成末 carousel、仍壓底）",
+    m12.length === 2 && m12[1].contents.contents.length === 1
+    && JSON.stringify(m12[1]).includes("關於這份清單"));
+}
+
+// ---- lineRequest 多 message ----
+{
+  const msgs = buildCardCarousels(Array.from({ length: 14 }, (_, i) => mkCard(i)), "alt");
+  const r = lineRequest("tk", "uid", msgs);
+  const b = JSON.parse(r.init.body);
+  chk("lineRequest 帶 2 個 flex message 原樣入 payload",
+    b.messages.length === 2 && b.messages.every((m) => m.type === "flex"));
 }
 
 // ---- 純文字降級版 ----

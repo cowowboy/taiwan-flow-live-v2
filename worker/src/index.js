@@ -1282,8 +1282,10 @@ export function lineRequest(token, userId, textOrMessages) {
 //   note/foot＝卡底口徑註記（B 類排行卡 note 必填：標明排序欄位，見規格 3B.2）。
 export const FX_COLORS = { up: "#D5342F", down: "#12855A", neutral: "#8A8F93", muted: "#9AA0A3" };
 // 誠實原則守門（規格第 4 節）：卡面禁用字。建構時擋＋測試字串比對雙保險。
-export const FX_FORBIDDEN = ["第1名", "第一名", "Top1", "TOP1", "最強", "最弱", "必漲", "必跌",
-  "該買", "該賣", "買進", "賣出", "建議關注", "值得關注", "訊號明確", "看多", "看空"];
+// 「Top 1」含空格的變體也擋（2026-07-28 驗收抓漏）。獨立的「建議」「關注」刻意不入清單：
+// 誤殺面太大（「外資關注度」等中性句），pm-aetf-1 解鎖時另以卡別專屬檢查處理其文案。
+export const FX_FORBIDDEN = ["第1名", "第一名", "Top1", "TOP1", "Top 1", "TOP 1", "最強", "最弱",
+  "必漲", "必跌", "該買", "該賣", "買進", "賣出", "建議關注", "值得關注", "訊號明確", "看多", "看空"];
 // C 類訊號卡白名單守門（規格 3B.3/6）：回測結論產出前不得上線。
 // 解鎖條件：alpha sweep AS-01~04 通過（前四張）；pm-aetf-1 另需文案改寫完成。
 export const FX_BLOCKED_CARDS = new Set(
@@ -1292,6 +1294,16 @@ export const FX_DISCLAIMER =
   "技術指標為現況描述、非買賣訊號，僅供參考。排序來自歷史統計的分層傾向，經回測確認不具單調性——名次先後不代表強弱高低。不預測後續走勢。";
 
 const fxText = (text, o = {}) => ({ type: "text", text: String(text), wrap: true, ...o });
+// KB 上限一律量 UTF-8 位元組——JSON.stringify().length 是 UTF-16 字元數，中文 1 字 3 bytes，
+// 用字元數守門會鬆 3 倍（2026-07-28 驗收抓到的實 bug）。
+const utf8len = (s) => new TextEncoder().encode(s).length;
+// 誠實原則＋C 類守門，Flex 與純文字降級版共用——違規內容不得從任何通道漏出
+export function assertCardAllowed(card) {
+  const bad = FX_FORBIDDEN.filter((w) =>
+    JSON.stringify([card.title, card.sub, card.paras, card.note, card.foot]).includes(w));
+  if (bad.length) throw new Error(`卡 ${card.id} 含禁用字: ${bad.join(",")}`);
+  if (FX_BLOCKED_CARDS.has(card.id)) throw new Error(`卡 ${card.id} 屬 C 類，回測未過不得上線`);
+}
 export function fxRow(r) {
   const cols = [];
   if (r.l != null) cols.push(fxText(r.l, { flex: 2, size: "xxs", color: FX_COLORS.muted }));
@@ -1301,10 +1313,7 @@ export function fxRow(r) {
   return { type: "box", layout: "horizontal", spacing: "sm", contents: cols };
 }
 export function cardBubble(card) {
-  const bad = FX_FORBIDDEN.filter((w) =>
-    JSON.stringify([card.title, card.sub, card.paras, card.note, card.foot]).includes(w));
-  if (bad.length) throw new Error(`卡 ${card.id} 含禁用字: ${bad.join(",")}`);
-  if (FX_BLOCKED_CARDS.has(card.id)) throw new Error(`卡 ${card.id} 屬 C 類，回測未過不得上線`);
+  assertCardAllowed(card);
   const body = [fxText(card.title, { weight: "bold", size: "md" })];
   if (card.sub) body.push(fxText(card.sub, { size: "xxs", color: FX_COLORS.muted }));
   for (const p of card.paras || []) body.push(fxText(p, { size: "sm", margin: "md" }));
@@ -1315,8 +1324,8 @@ export function cardBubble(card) {
     fxText(foot.join("\n"), { size: "xxs", color: FX_COLORS.muted, margin: "sm" }));
   const b = { type: "bubble", size: "kilo",
     body: { type: "box", layout: "vertical", contents: body } };
-  const bytes = JSON.stringify(b).length;
-  if (bytes > 30000) throw new Error(`卡 ${card.id} bubble ${bytes}B 超過 30KB`);
+  const bytes = utf8len(JSON.stringify(b));
+  if (bytes >= 30000) throw new Error(`卡 ${card.id} bubble ${bytes}B（UTF-8）達 30KB 上限`);
   return b;
 }
 export function disclaimerBubble() {
@@ -1331,8 +1340,8 @@ export function buildCardCarousels(cards, altText) {
   for (let i = 0; i < bubbles.length; i += 12) {
     const contents = bubbles.slice(i, i + 12);
     const c = { type: "carousel", contents };
-    const bytes = JSON.stringify(c).length;
-    if (bytes > 50000) throw new Error(`carousel#${messages.length} ${bytes}B 超過 50KB`);
+    const bytes = utf8len(JSON.stringify(c));
+    if (bytes >= 50000) throw new Error(`carousel#${messages.length} ${bytes}B（UTF-8）達 50KB 上限`);
     messages.push({ type: "flex",
       altText: String(altText || "股市雷達 盤後圖卡").slice(0, 1500), contents: c });
   }
@@ -1340,7 +1349,10 @@ export function buildCardCarousels(cards, altText) {
   return messages;
 }
 // 純文字降級版（webhook 通道用；Flex 建構丟例外時 LINE 也退這份，規格 5.3）
+// 同樣過 assertCardAllowed——降級是為版型錯誤設計的退路，不是誠實原則的漏洞；
+// 發送層應先逐卡過濾（過不了的卡整張剔除），再把剩餘卡分別餵兩條路徑。
 export function cardsFallbackText(cards, dateStr) {
+  for (const c of cards) assertCardAllowed(c);
   const L = [`【股市雷達 盤後圖卡】${dateStr || ""}`];
   for (const c of cards) {
     L.push(`■ ${c.title}${c.sub ? `（${c.sub}）` : ""}`);
