@@ -349,7 +349,7 @@
   晨報、主動ETF 的**前端**已拆到「新聞晨報」「盤後分析」兩個姊妹站，
   但兩者的**資料管線仍在本 repo**，下游站跨 repo 讀 `data/`。
 - 摘要分析 tab（2026-07-12 新增，第 6 個 tab）：前端直呼 Claude，框架與 postmkt 逐字同源
-  （callClaude adaptive thinking/effort medium/max_tokens 8000、mdToHtml、token 用量與
+  （callClaude adaptive thinking/effort medium/max_tokens 16000、mdToHtml、token 用量與
   台灣時間顯示、Opus 4.8/Sonnet 5 模型切換）。insightGatherContext 彙整：大盤即時
   （指數點/%/漲跌家數）、產業別資金前8強＋跌勢前5、資金湧入 flow.subs 前12、
   個股資金集中 c10 前15（含投信/外資連買、法人強度）；盤前 flow=null 會註明略過。
