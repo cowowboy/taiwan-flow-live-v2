@@ -1266,10 +1266,90 @@ export function webhookRequest(urlStr, text) {
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } };
 }
 // LINE Messaging API push 請求建構（純函式，可離線驗格式）
-export function lineRequest(token, userId, text) {
+// 第二參數可為字串（既有呼叫端，包成 text message）或 message object 陣列（Flex 圖卡用）
+export function lineRequest(token, userId, textOrMessages) {
+  const messages = Array.isArray(textOrMessages)
+    ? textOrMessages : [{ type: "text", text: textOrMessages }];
   return { url: "https://api.line.me/v2/bot/message/push", init: { method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({ to: userId, messages: [{ type: "text", text }] }) } };
+    body: JSON.stringify({ to: userId, messages }) } };
+}
+
+// ---- LINE Flex 圖卡渲染層（2026-07-28，規格：docs/line-cards-spec.md）----
+// 全部純函式、無 I/O。卡片資料物件 → Flex bubble/carousel JSON。
+// 卡片資料形狀：{ id, title, sub, rows:[{l,m,r,c}], paras:[str], note, foot }
+//   rows＝三欄資料列（代號/名稱/數值，c=顏色鍵）；paras＝純文字段（看板卡）；兩者可並用。
+//   note/foot＝卡底口徑註記（B 類排行卡 note 必填：標明排序欄位，見規格 3B.2）。
+export const FX_COLORS = { up: "#D5342F", down: "#12855A", neutral: "#8A8F93", muted: "#9AA0A3" };
+// 誠實原則守門（規格第 4 節）：卡面禁用字。建構時擋＋測試字串比對雙保險。
+export const FX_FORBIDDEN = ["第1名", "第一名", "Top1", "TOP1", "最強", "最弱", "必漲", "必跌",
+  "該買", "該賣", "買進", "賣出", "建議關注", "值得關注", "訊號明確", "看多", "看空"];
+// C 類訊號卡白名單守門（規格 3B.3/6）：回測結論產出前不得上線。
+// 解鎖條件：alpha sweep AS-01~04 通過（前四張）；pm-aetf-1 另需文案改寫完成。
+export const FX_BLOCKED_CARDS = new Set(
+  ["flows-sync-1", "flows-sync-2", "flows-oppose-1", "flows-oppose-2", "pm-aetf-1"]);
+export const FX_DISCLAIMER =
+  "技術指標為現況描述、非買賣訊號，僅供參考。排序來自歷史統計的分層傾向，經回測確認不具單調性——名次先後不代表強弱高低。不預測後續走勢。";
+
+const fxText = (text, o = {}) => ({ type: "text", text: String(text), wrap: true, ...o });
+export function fxRow(r) {
+  const cols = [];
+  if (r.l != null) cols.push(fxText(r.l, { flex: 2, size: "xxs", color: FX_COLORS.muted }));
+  cols.push(fxText(r.m, { flex: 5, size: "sm" }));
+  cols.push(fxText(r.r, { flex: 3, size: "sm", align: "end", weight: "bold",
+    color: FX_COLORS[r.c] || FX_COLORS.neutral }));
+  return { type: "box", layout: "horizontal", spacing: "sm", contents: cols };
+}
+export function cardBubble(card) {
+  const bad = FX_FORBIDDEN.filter((w) =>
+    JSON.stringify([card.title, card.sub, card.paras, card.note, card.foot]).includes(w));
+  if (bad.length) throw new Error(`卡 ${card.id} 含禁用字: ${bad.join(",")}`);
+  if (FX_BLOCKED_CARDS.has(card.id)) throw new Error(`卡 ${card.id} 屬 C 類，回測未過不得上線`);
+  const body = [fxText(card.title, { weight: "bold", size: "md" })];
+  if (card.sub) body.push(fxText(card.sub, { size: "xxs", color: FX_COLORS.muted }));
+  for (const p of card.paras || []) body.push(fxText(p, { size: "sm", margin: "md" }));
+  if ((card.rows || []).length) body.push({ type: "box", layout: "vertical", spacing: "xs",
+    margin: "md", contents: card.rows.map(fxRow) });
+  const foot = [card.note, card.foot].filter(Boolean);
+  if (foot.length) body.push({ type: "separator", margin: "md" },
+    fxText(foot.join("\n"), { size: "xxs", color: FX_COLORS.muted, margin: "sm" }));
+  const b = { type: "bubble", size: "kilo",
+    body: { type: "box", layout: "vertical", contents: body } };
+  const bytes = JSON.stringify(b).length;
+  if (bytes > 30000) throw new Error(`卡 ${card.id} bubble ${bytes}B 超過 30KB`);
+  return b;
+}
+export function disclaimerBubble() {
+  return cardBubble({ id: "_disclaimer", title: "關於這份清單",
+    paras: [FX_DISCLAIMER], foot: "口徑與回測依據：backtest/report_sorting.md" });
+}
+// 卡片陣列 → messages 陣列（每 carousel ≤12 bubble、≤50KB；≤5 message；免責卡固定壓底）
+export function buildCardCarousels(cards, altText) {
+  const bubbles = cards.map(cardBubble);
+  bubbles.push(disclaimerBubble());
+  const messages = [];
+  for (let i = 0; i < bubbles.length; i += 12) {
+    const contents = bubbles.slice(i, i + 12);
+    const c = { type: "carousel", contents };
+    const bytes = JSON.stringify(c).length;
+    if (bytes > 50000) throw new Error(`carousel#${messages.length} ${bytes}B 超過 50KB`);
+    messages.push({ type: "flex",
+      altText: String(altText || "股市雷達 盤後圖卡").slice(0, 1500), contents: c });
+  }
+  if (messages.length > 5) throw new Error(`messages ${messages.length} 超過一次 push 上限 5`);
+  return messages;
+}
+// 純文字降級版（webhook 通道用；Flex 建構丟例外時 LINE 也退這份，規格 5.3）
+export function cardsFallbackText(cards, dateStr) {
+  const L = [`【股市雷達 盤後圖卡】${dateStr || ""}`];
+  for (const c of cards) {
+    L.push(`■ ${c.title}${c.sub ? `（${c.sub}）` : ""}`);
+    for (const p of c.paras || []) L.push(`  ${p}`);
+    for (const r of (c.rows || []).slice(0, 5))
+      L.push(`  ${r.l != null ? r.l + " " : ""}${r.m}  ${r.r}`);
+  }
+  L.push(`※ ${FX_DISCLAIMER}`);
+  return L.join("\n");
 }
 // 外送：通道可並存（webhook 與 LINE 都設就都發）；單通道失敗不擋另一通道（errors 帶回）；
 // 全部未設 → {sent:false}（靜默，不打任何外部請求）
