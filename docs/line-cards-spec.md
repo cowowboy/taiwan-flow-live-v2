@@ -417,3 +417,54 @@ M1 原本就採 R 值，結論不變；S2 見第 3 節卡 5。其餘排序欄平
   比對報告是否與腳本同步。目前靠上述離線結構檢查涵蓋「結論行消失」這類回歸
   （即 commit f46aaf8 手改報告造成的那類）。若要完整涵蓋，需在 Actions 排一支
   帶 `FINMIND_TOKEN` 的週期性 job（抓快取約 50 分鐘），尚未建置。
+
+---
+
+## 9. 資料組裝層（2026-07-28 調查定案）
+
+第一期實際組裝 **33 張**（38 − C 類 5 張，後者由 `FX_BLOCKED_CARDS` 建構時擋）。
+完整逐卡對應表（來源 URL／JSON path／更新時點／複雜度）見調查紀錄，此處只記決策與缺口。
+
+### 9.1 架構決策
+
+1. **推播時點：台北 22:30–23:00 窗**，接在既有 evening 協調班之後。理由：資料最晚
+   就緒鏈是 postmkt daytrade 二段（~21:30 後觸發）與 aetf2（≥21:45）；baseline
+   （6 張訊號卡全依賴）20:05–20:55 就緒、flows 系 21:19–21:4x 常態就緒。
+2. **一次推播 fetch 13 支 JSON ≈ 3.1MB**，其中 postmkt.json 2.43MB 佔大宗——
+   `runEvening` 既有 `getP` 快取（`worker/src/index.js:1063-1064`）同一次喚醒可共用。
+3. **v2-ov-7／v2-ov-14／v2-chain-1 走 build_daysummary 補欄**，不走推播時呼叫
+   buildLive：後者依賴「收盤後 /live 仍回當日定格」在 21:30+ 是否成立未驗證，
+   且每次推播多 580KB classify ＋ FinMind snapshot。收盤資料落地成 JSON 才可驗。
+4. **v2-global-1 的 VIX**：推播時打一次 `finFuturesVix`（`index.js:50-75` 既有函式），
+   失敗則該欄顯示「—」，不擋整張卡。
+5. **pm-mktbal-1/2 的時效**：mktbal 在鏈尾（GH 備援 22:55，實測拖到過隔日 04:49）。
+   組裝層**帶資料日標註**（誠實原則的來源徽章慣例），落後就標「資料日 MM-DD」，
+   不跳卡、不裝新。
+6. **Regime 閘門的 TAIEX 20 日序列**：取 flows `totals.json → rows[date].taiex`
+   （91 交易日、偶有 null——實查 2026-06-30 為 null，20MA 計算需容 null 跳過）。
+
+### 9.2 上游資料缺口（Phase A，先於組裝層）
+
+| # | 缺口 | 修改點 | 性質 |
+|---|---|---|---|
+| 1 | 卡 3 排序母體 `nh`（突破20日新高旗標） | `src/build_baseline.py:217-223`＋schema 註解 `:4/:12`，加在 stocks 陣列 index 8 | additive，消費端 `index.js:142-148` 只讀到 b[6] 不受影響 |
+| 2 | 卡 1 排序 R 值（＋C 值） | `build_baseline.py:68-100` sub_signal 回傳值＋`:225-229` subs_y 擴充為 `[y1,y2,C,R]` | additive；Worker 透傳點 `index.js:453,464`；v2 前端讀 subs_y 處需驗不破 |
+| 3 | 卡 4 排序「量能趨勢」需 a20 | build_baseline 主迴圈已握 21 日資料（NDAYS=21 `:31`），加 20 日均額欄 | additive |
+| 4 | ov-7/ov-14/chain-1 收盤全表 | `src/build_daysummary.py` 補 chain 聚合與全 subs 表 | 檔案變大需評估（daysummary 現僅 2KB） |
+
+注意：subs_y 的 C/R 是**日線口徑**（`backtest/run_sorting.py` 同款）；KV `flow:last`
+的 `c1/c2/ret` 是盤中 10/30 分窗口徑，**不可混用**（調查已確認兩者不同源）。
+
+### 9.3 組裝層驗收條件（Phase B）
+
+- [ ] `buildDailyCards(data)` 純函式：輸入 13 支 JSON 的物件包，輸出卡片資料物件陣列；
+      無 fetch、無 KV、無 Date.now（日期由參數傳入）
+- [ ] 每張卡可獨立失敗：來源缺欄／JSON 空 → 該卡剔除並記入 skipped 清單，不擋其他卡
+- [ ] 發送層：判空（0 卡不推）、逐卡過 `assertCardAllowed` 預過濾、Flex 失敗退純文字
+- [ ] regime 閘門只作用卡 1/卡 2；TAIEX 20MA 容 null
+- [ ] 每張卡帶資料日標註；落後的來源標日期不裝新
+- [ ] KV 去重 `alerted:<date>:cards` 同款鍵型，一晚只推一次
+- [ ] 離線測試：13 支 JSON 的 fixture（從真實 data/ 抄縮減版）→ 33 張全產出斷言；
+      單一來源缺失 → 對應卡 skipped 其他不受影響
+- [ ] `worker/test/` 既有測試零回歸
+- [ ] fresh-context subagent 驗收（鐵律 #3）
