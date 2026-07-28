@@ -1423,18 +1423,21 @@ const fxNeed = (v, what) => { if (v == null) throw new Error(`${what} 缺`); ret
 // 卡面前先做同義中性替換，否則 assertCardAllowed 會把整張卡打掉。
 const fxSanitize = (t) => String(t).replaceAll("最強", "最大").replaceAll("最弱", "最小");
 
+// 陣列守門：來源「非 null 但形狀壞」（rows=42、buy_by_amt={}）時退空陣列——
+// 沒有這層，單一源半寫壞會讓共用 ctx 建構拋例外、33 張全滅（B1 驗收 A2 缺口）
+const fxArr = (x) => (Array.isArray(x) ? x : []);
 // 代號→名稱：flowsDaily／baseline 皆無名稱欄（實檔確認），從其餘來源湊；查不到回退代號。
 export function fxNameMap(s) {
   const m = new Map();
-  const add = (c, n) => { if (c != null && n && !m.has(String(c))) m.set(String(c), String(n)); };
+  const add = (r, ck, nk) => { if (r && r[ck] != null && r[nk] && !m.has(String(r[ck]))) m.set(String(r[ck]), String(r[nk])); };
   for (const pg of ["foreign", "trust"])
     for (const k of ["buy_by_amt", "sell_by_amt", "buy_by_chg", "sell_by_chg", "buy_by_vol", "sell_by_vol"])
-      for (const r of (s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages[pg] || {})[k] || []) add(r.code, r.name);
-  for (const r of (s.postmkt && s.postmkt.lending || {}).rows || []) add(r.c, r.n);
-  for (const r of (s.postmkt && s.postmkt.blocktrade || {}).rows || []) add(r.c, r.n);
-  for (const r of (s.aetfDiff || {}).stocks || []) add(r.c, r.n);
-  for (const k of ["stocks_top5", "stocks_bot3"]) for (const r of (s.daysummary || {})[k] || []) add(r.c, r.n);
-  for (const k of ["it3", "it3_sell"]) for (const r of (s.morning && s.morning.chips || {})[k] || []) add(r.c, r.n);
+      for (const r of fxArr((s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages[pg] || {})[k])) add(r, "code", "name");
+  for (const r of fxArr((s.postmkt && s.postmkt.lending || {}).rows)) add(r, "c", "n");
+  for (const r of fxArr((s.postmkt && s.postmkt.blocktrade || {}).rows)) add(r, "c", "n");
+  for (const r of fxArr((s.aetfDiff || {}).stocks)) add(r, "c", "n");
+  for (const k of ["stocks_top5", "stocks_bot3"]) for (const r of fxArr((s.daysummary || {})[k])) add(r, "c", "n");
+  for (const k of ["it3", "it3_sell"]) for (const r of fxArr((s.morning && s.morning.chips || {})[k])) add(r, "c", "n");
   return m;
 }
 // flows daily 檔（cols+rows 陣列表）→ 代號索引。cols 見 taiwan-flows CLAUDE.md 尾（張/千元/%）。
@@ -1450,7 +1453,7 @@ export function fxFlowsIndex(fd) {
 // Regime 判定（規格 9.1.6）：totals.rows[date].taiex 取最近 20 個非 null 值算 MA（含最新日），
 // 收盤>MA=bull。資料不足 20 筆→視為 bull（保守：不抑制）並由卡 note 標「regime 未判定」。
 export function fxRegime(totals) {
-  const dates = (totals && totals.dates) || [];
+  const dates = fxArr(totals && totals.dates);
   const vals = [];
   for (const d of dates) {
     const v = totals && totals.rows && totals.rows[d] ? totals.rows[d].taiex : null;
@@ -1809,7 +1812,12 @@ export const FX_CARD_BUILDERS = [
 ];
 export function buildDailyCards(src) {
   const s = src || {};
-  const ctx = { names: fxNameMap(s), regime: fxRegime(s.totals), flows: fxFlowsIndex(s.flowsDaily) };
+  // ctx 三件各自帶保底：任何一件建構失敗只降級該件（names 空 Map／regime 未判定／
+  // flows null），逐卡 builder 自行面對降級後的 ctx——不讓共用層拖垮 33 張
+  const ctx = {};
+  try { ctx.names = fxNameMap(s); } catch { ctx.names = new Map(); }
+  try { ctx.regime = fxRegime(s.totals); } catch { ctx.regime = { regime: "bull", undetermined: true }; }
+  try { ctx.flows = fxFlowsIndex(s.flowsDaily); } catch { ctx.flows = null; }
   const cards = [], skipped = [];
   for (const [id, fn] of FX_CARD_BUILDERS) {
     try {

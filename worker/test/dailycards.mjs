@@ -319,5 +319,29 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   chk("不竄改輸入物件", JSON.stringify(fx) === snap);
 }
 
+// ---- 8. 形狀壞的源不得全滅（B1 驗收 A2 缺口的回歸測試）----
+// 「非 null 但形狀歪」：rows=42、buy_by_amt={}、dates=42——修正前這三種都會讓
+// 共用 ctx 建構（fxNameMap/fxRegime）拋例外、33 張全滅。
+{
+  for (const [label, mut] of [
+    ["lending.rows=42", (f) => { f.postmkt.lending.rows = 42; }],
+    ["buy_by_amt={}", (f) => { f.flowsLatest.pages.foreign.buy_by_amt = {}; }],
+    ["totals.dates=42", (f) => { f.totals.dates = 42; }],
+  ]) {
+    const fx = FIX(); mut(fx);
+    let out = null, err = null;
+    try { out = buildDailyCards(fx); } catch (e) { err = e.message; }
+    chk(`${label} 不拋例外`, err === null, err);
+    chk(`${label} 仍產出多數卡（>20 張）`, out && out.cards.length > 20,
+      out && `cards=${out.cards.length}`);
+  }
+  // totals.dates 壞 → regime 降級為未判定（視為 bull 不抑制），卡 1 note 帶標註
+  const fx = FIX(); fx.totals.dates = 42;
+  const out = buildDailyCards(fx);
+  const c1 = out.cards.find((c) => c.id === "sig-sub-surge");
+  chk("totals 壞 → regime 降級未判定、卡1 照發且帶標註",
+    c1 && /regime 未判定/.test([c1.note, c1.foot].join("")), c1 && (c1.note || c1.foot));
+}
+
 console.log(`dailycards: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
