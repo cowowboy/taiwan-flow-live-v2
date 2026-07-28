@@ -1,7 +1,7 @@
 # src/build_baseline.py — 產 data/baseline.json（資金湧入偵測的常態基準，每交易日收盤後跑）
 #
 # 內容（給 Worker /live 當靜態依賴，快取到隔日）：
-#   stocks: {code: [a5, it, fi, y1, y2, ints, nl, its]}
+#   stocks: {code: [a5, it, fi, y1, y2, ints, nl, its, nh, a20]}
 #     a5 = 前 5 個交易日平均成交額（元）→ 集中度分母（個股常態佔比 = a5/tot5）
 #     it/fi = 投信/外資近 3 交易日買超日數 0~3（回測實證的個股續勢旗標）
 #     its = 投信近 3 交易日賣超日數 0~3（連買的反向：連賣旗標）
@@ -10,8 +10,14 @@
 #     ints = 法人買賣強度%（最近一日 (投信+外資淨買股數×close)/成交額×100，1位小數）
 #       回測（report_indicators.md）：>5% 疊湧入 -0.51→-0.10；<-5% 疊退出 -0.64→-0.97
 #     nl = 1 若最近一日收盤跌破前20日收盤最低（破底；退出訊號最強技術確認 -0.64→-1.08）
-#   subs_y: {次產業: [y1, y2]}（僅列非零者）
+#     nh = 1 若最近一日收盤突破前20日收盤最高（創高；與 nl 對稱，LINE 卡3 排序母體用）
+#     a20 = 前 20 個交易日（含最近一日）平均成交額（元）；分母＝窗內有效日數，口徑同
+#       backtest/run_sorting.py 的 volt 分母（aw=amt[t-19:t+1] 濾空、除以 len(aw)）。
+#       LINE 卡4「量能趨勢」= a5/a20
+#   subs_y: {次產業: [y1, y2, C, R]}（僅列旗標非零者）
 #       次產業訊號＝集中度(佔比/前5日均佔比)≥1.5 且 等權漲跌 ≥1%(湧)/≤-1%(退)
+#       C = 最近一日集中度（湧入判定用的同一值，日線口徑）、R = 成員等權平均漲跌（小數）；
+#       僅旗標由 y2 成立而當日未過金額/基期門檻者為 null。LINE 卡1 排序用。
 #       回測：次產業昨湧→今日平均續強(+0.3pp)、連湧更強；昨退→今日偏弱
 #   tot5 = 全市場（上市+上櫃）5 日均總額（元）；days = 取用的交易日（新→舊，共 7）
 #
@@ -66,11 +72,16 @@ def day_signal(pd, i):
 
 
 def sub_signal(pd, i, members):
-    """第 i 日的次產業訊號 {sub: 1/-1}。集中度=佔比/前5日均佔比。"""
+    """第 i 日的次產業訊號。集中度=佔比/前5日均佔比。
+
+    回 (flags, stats)：flags={sub: 1/-1}（語意同舊版回傳值）；
+    stats={sub: (conc, ret)}——conc=當日集中度、ret=成員等權平均漲跌（小數），
+    凡通過金額/基期門檻者皆記錄（不限旗標成立者），供 subs_y 附掛 C/R。
+    ret 在有效成員數 < SUB_MIN_MEM 時為 None（樣本不足，不據以判旗標，同原邏輯）。"""
     tots = []
     for k in range(i, i + 6):
         tots.append(sum(v[0] or 0 for c, v in pd[k].items() if not c.startswith("00")))
-    out = {}
+    out, stats = {}, {}
     for sub, mem in members.items():
         amt_now = sum((pd[i].get(c) or (0,))[0] or 0 for c in mem)
         if amt_now < SUB_AMT_MIN or not tots[0]:
@@ -88,13 +99,42 @@ def sub_signal(pd, i, members):
             c1 = (pd[i + 1].get(c) or (None, None))[1]
             if c0 and c1:
                 rets.append(c0 / c1 - 1)
-        if len(rets) < SUB_MIN_MEM or conc < 1.5:
+        ret = sum(rets) / len(rets) if len(rets) >= SUB_MIN_MEM else None
+        stats[sub] = (conc, ret)
+        if ret is None or conc < 1.5:
             continue
-        ret = sum(rets) / len(rets)
         if ret >= 0.01:
             out[sub] = 1
         elif ret <= -0.01:
             out[sub] = -1
+    return out, stats
+
+
+def nh_nl(cur_close, prev_closes):
+    """對稱新高/破底旗標：收盤 > 前20日收盤最高 → nh=1；收盤 < 前20日收盤最低 → nl=1。"""
+    if not prev_closes:
+        return 0, 0
+    return (1 if cur_close > max(prev_closes) else 0,
+            1 if cur_close < min(prev_closes) else 0)
+
+
+def a20_of(pd, c):
+    """前 20 個交易日（含最近一日）平均成交額（元，取整）。
+    分母＝窗內有效日數（濾掉無資料/零額日），口徑同 backtest/run_sorting.py:151-152
+    的 volt 分母：aw = amt[t-19:t+1] 濾空後 sum/len。"""
+    aw = [v[0] for v in (pd[k].get(c) for k in range(20)) if v and v[0]]
+    return round(sum(aw) / len(aw)) if aw else 0
+
+
+def build_subs_y(s1, s2, stats):
+    """subs_y 組裝：{sub: [y1, y2, C, R]}（僅旗標非零者）。
+    C=當日集中度（2位小數）、R=成員等權漲跌（小數4位）；當日未過門檻者為 None。"""
+    out = {}
+    for k in set(s1) | set(s2):
+        conc, ret = stats.get(k, (None, None))
+        out[k] = [s1.get(k, 0), s2.get(k, 0),
+                  round(conc, 2) if conc is not None else None,
+                  round(ret, 4) if ret is not None else None]
     return out
 
 
@@ -201,7 +241,8 @@ def main():
         print(f"inst {ds} ok", flush=True)
 
     y1, y2 = day_signal(pd, 0), day_signal(pd, 1)
-    s1, s2 = sub_signal(pd, 0, members), sub_signal(pd, 1, members)
+    s1, sub_stats = sub_signal(pd, 0, members)   # 當日 stats 供 subs_y 的 C/R
+    s2, _ = sub_signal(pd, 1, members)           # y2 只需旗標，不需昨日 C/R
 
     stocks = {}
     tot5 = 0.0
@@ -211,20 +252,18 @@ def main():
         if not amts:
             continue
         a5 = sum(amts) / 5
-        # 法人強度%（最近一日）與 破20日新低
+        # 法人強度%（最近一日）與 破20日新低/突破20日新高（對稱）
         cur = pd[0].get(c)
         ints = 0.0
-        nl = 0
+        nh = nl = 0
         if cur and cur[0] and cur[1] is not None:
             ints = round(net0.get(c, 0) * cur[1] / cur[0] * 1000) / 10
-            lows = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
-            if lows and cur[1] < min(lows):
-                nl = 1
-        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl, its.get(c, 0)]
+            prevs = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
+            nh, nl = nh_nl(cur[1], prevs)
+        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl, its.get(c, 0),
+                     nh, a20_of(pd, c)]
         tot5 += a5
-    subs_y = {}
-    for k in set(s1) | set(s2):
-        subs_y[k] = [s1.get(k, 0), s2.get(k, 0)]
+    subs_y = build_subs_y(s1, s2, sub_stats)
 
     out = {"date": days[0], "days": days, "tot5": round(tot5), "stocks": stocks, "subs_y": subs_y}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -234,7 +273,8 @@ def main():
           f"昨湧{n_y1}/昨退{n_y1d} 檔, 次產業旗標 {len(subs_y)} 個, "
           f"投信3連買 {sum(1 for v in stocks.values() if v[1] == 3)} 檔, "
           f"法人強度>5% {sum(1 for v in stocks.values() if v[5] > 5)} 檔, "
-          f"破底 {sum(1 for v in stocks.values() if v[6])} 檔")
+          f"破底 {sum(1 for v in stocks.values() if v[6])} 檔, "
+          f"創高 {sum(1 for v in stocks.values() if v[8])} 檔")
 
 
 if __name__ == "__main__":
