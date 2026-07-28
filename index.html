@@ -1001,8 +1001,10 @@ function insightGatherContext(){
   return { text: parts.join("\n\n"), primary, dates };
 }
 // 打開 adaptive thinking：Opus 4.8 省略 thinking=不思考，故明確指定；effort medium 平衡
-// 深度與延遲；只取 text block(thinking display 預設 omitted，不渲染思考)。max_tokens 拉高
-// 給思考+輸出留空間。signal 為可選 AbortSignal（中斷用），不傳＝行為不變；
+// 深度與延遲；只取 text block(thinking display 預設 omitted，不渲染思考)。max_tokens 16000：
+// thinking 與回覆文字共用同一份額度，Sonnet 5 已移除 budget_tokens（送出即 400），無法單獨
+// 限制 thinking；原本 8000 在盤後分析那類大 context 上會被 thinking 吃光而回不出文字。
+// signal 為可選 AbortSignal（中斷用），不傳＝行為不變；
 // 中斷時把 AbortError 轉成好讀的「已手動中斷」。
 // 【三站同步】本函式在 postmkt／taiwan-flow-live-v2／taiwan-stock-news 逐字一致，改動需同步三站。
 async function callClaude(key, model, system, userMsg, signal){
@@ -1011,7 +1013,7 @@ async function callClaude(key, model, system, userMsg, signal){
       method:"POST",
       headers:{ "content-type":"application/json", "x-api-key":key,
         "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
-      body: JSON.stringify({ model, max_tokens:8000,
+      body: JSON.stringify({ model, max_tokens:16000,
         thinking:{ type:"adaptive" }, output_config:{ effort:"medium" },
         system, messages:[{role:"user",content:userMsg}] }),
       signal
