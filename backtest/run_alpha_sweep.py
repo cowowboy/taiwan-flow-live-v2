@@ -1,0 +1,769 @@
+#!/usr/bin/env python3
+# backtest/run_alpha_sweep.py — 全站 Alpha 盤點掃描（第一階段 14 候選 / K=16）
+#
+# 規格：docs/alpha-sweep-preregistration.md（已 commit、已凍結）。
+#   §1 方法（主要結果變數 e3、不報 p 值、切半驗證、採用門檻、三層報告、多重比較揭露）
+#   §2.1 候選清單 14 列（AS-03/AS-04 為雙邊檢定各計 2 → K=16）
+#   §2.2 已知偏差 4 項（必須寫進報告）
+# **本檔不得自行增刪候選、不得改判準門檻**——那會讓「先註冊後測」失去意義。
+#
+# 沿用既有程式（不重造）：
+#   run_sorting.load()               快取載入（price_*.json.gz / inst_*.json.gz / classify.json）
+#   run_sorting.build_stock_samples()樣本結構（27 個 key，含 e1/e3、流動性過濾、排除 ETF）
+#   run_sorting.stat()/fmt()/monthly() 統計與輸出格式
+#   run_sorting.max_tie_rate()       排序欄平手率診斷（本檔只印診斷，不當判準）
+#
+# 技術指標：Worker 生產實作 worker/src/index.js:1787-1888（sma/ema/kd/macd/rsi/boll）
+# 與其狀態描述 :1898-1931（kdState/macdState/bollState）的 Python 逐行移植。
+# 兩份實作的漂移由 backtest/test_alpha_parity.mjs 守門（node 端跑同一組合成序列，零差異）。
+#
+# 用法：
+#   python backtest/run_alpha_sweep.py        # 需 backtest/cache/ 有快取 → 寫 report_alpha_sweep.md
+#   node   backtest/test_alpha_parity.mjs     # JS↔Python 指標一致性（免快取）
+#   python backtest/test_alpha_sweep_smoke.py # 合成樣本煙霧測試（免快取）
+
+from __future__ import annotations
+
+import math
+import statistics as st
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_sorting as rs  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+DOC = ROOT / "docs" / "alpha-sweep-preregistration.md"
+OUT = ROOT / "backtest" / "report_alpha_sweep.md"
+
+# ── 判準門檻（預註冊書 §1.5，先訂，不得於本次執行後調整）──────────
+MIN_N_FULL = 500      # 全期樣本數
+MIN_N_HALF = 200      # 前後半各自樣本數
+MIN_ABS_E3 = 0.50     # 全期 |e3 平均|（%）
+# ── 訊號建構參數（預註冊書 §2.1 字面）────────────────────────────
+TOP_N = 30            # AS-01~04：當日強度前 30 名
+DECILE = 0.10         # AS-05/06：當日前/後 10%
+
+
+# ── 候選清單（預註冊書 §2.1，14 列；順序與編號逐項對應，不得增刪）──
+SIGNALS = [
+    dict(id="AS-01", src="flows 同步", weight=1, dir="long",
+         desc="外資淨買>0 且 投信淨買>0，強度=min(|外資額|,|投信額|) 當日前 30 名"),
+    dict(id="AS-02", src="flows 同步", weight=1, dir="short",
+         desc="外資淨買<0 且 投信淨買<0，強度同義前 30 名"),
+    dict(id="AS-03", src="flows 對作", weight=2, dir="both",
+         desc="外資買 ∩ 投信賣，強度前 30 名"),
+    dict(id="AS-04", src="flows 對作", weight=2, dir="both",
+         desc="投信買 ∩ 外資賣，強度前 30 名"),
+    dict(id="AS-05", src="v2 成交佔比", weight=1, dir="long",
+         desc="佔週變（本週佔比−上週佔比，pp）當日前 10%"),
+    dict(id="AS-06", src="v2 成交佔比", weight=1, dir="short",
+         desc="佔週變當日後 10%"),
+    dict(id="AS-07", src="news 個股追蹤", weight=1, dir="long",
+         desc="KD(9,3,3) 黃金交叉且 K<50"),
+    dict(id="AS-08", src="news 個股追蹤", weight=1, dir="short",
+         desc="KD 死亡交叉且 K>50"),
+    dict(id="AS-09", src="news 個股追蹤", weight=1, dir="long",
+         desc="MACD(12,26,9) 柱由負翻正"),
+    dict(id="AS-10", src="news 個股追蹤", weight=1, dir="short",
+         desc="MACD 柱由正翻負"),
+    dict(id="AS-11", src="news 個股追蹤", weight=1, dir="long",
+         desc="RSI(5) < 20（均值回歸）"),
+    dict(id="AS-12", src="news 個股追蹤", weight=1, dir="short",
+         desc="RSI(5) > 80（均值回歸）"),
+    dict(id="AS-13", src="news 個股追蹤", weight=1, dir="long",
+         desc="收盤突破布林上軌（20, 2σ, 母體標準差）"),
+    dict(id="AS-14", src="news 個股追蹤", weight=1, dir="short",
+         desc="收盤跌破布林下軌"),
+]
+# K＝檢定次數：雙邊檢定各計 2（預註冊書 §2 前言 + §2.1 註）。由清單自動帶入，不手填。
+K_TESTS = sum(s["weight"] for s in SIGNALS)
+
+DIR_LABEL = {"long": "做多", "short": "做空", "both": "雙邊（計 2）"}
+
+# 預註冊書 §2.2 已知偏差（原文摘要，必須印進報告）
+KNOWN_BIASES = [
+    "**外資口徑少一塊**：快取的 inst 只收 `Investment_Trust` + `Foreign_Investor`，"
+    "生產的外資＝`Foreign_Investor + Foreign_Dealer_Self`（`taiwan-flows/src/pipeline.py:12`）。"
+    "AS-01~04 的外資金額因此略小於線上值；未修之前，AS-01~04 的結論只適用於"
+    "「不含外資自營」的口徑。",
+    "**快取無自營**：所以完全沒有涉及自營的候選。",
+    "**`Trading_Volume` 未存**：快取只有 `Trading_money`（`fetch.py:88`）。"
+    "用金額當成交量的代理會失真（金額＝量×均價），所以量能類指標全部不列入第一階段。",
+    "**52 週高低暖身不足**：需 ~250 交易日暖身，快取全長僅 255 日，扣掉後只剩約 1 個月可算。排除。",
+]
+
+
+# ════════════════════════════════════════════════════════════════
+# 一、技術指標：worker/src/index.js 純函式的 Python 移植
+#     對照行號寫在各函式；語意差一點都會讓兩站口徑漂移，改動必須同步改 JS 並跑 parity。
+# ════════════════════════════════════════════════════════════════
+
+def jround(x: float) -> int:
+    """JS `Math.round` 語意（half-up 朝 +∞），非 Python `round` 的 banker's rounding。
+
+    不寫成 floor(x+0.5)：x+0.5 在浮點下可能進位（如 0.49999999999999994），
+    ES 規範與 V8 對該值回 0，floor(x+0.5) 會回 1。
+    """
+    f = math.floor(x)
+    return f + 1 if x - f >= 0.5 else f
+
+
+def r2(v: float) -> float:
+    """index.js:21 `const r2 = (v) => Math.round(v * 100) / 100;`"""
+    return jround(v * 100) / 100
+
+
+def sma(arr, period):
+    """index.js:1787-1793。不足 period 回 None。"""
+    a = arr or []
+    if len(a) < period or period <= 0:
+        return None
+    s = 0.0
+    for i in range(len(a) - period, len(a)):
+        s += a[i]
+    return s / period
+
+
+def ema(arr, period):
+    """index.js:1796-1805。回整條序列；種子＝前 period 個的 SMA；不足 period 回 []。"""
+    a = arr or []
+    if len(a) < period or period <= 0:
+        return []
+    k = 2 / (period + 1)
+    out = [None] * len(a)
+    seed = 0.0
+    for i in range(period):
+        seed += a[i]
+    out[period - 1] = seed / period
+    for i in range(period, len(a)):
+        out[i] = a[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def kd_path(highs, lows, closes, n=9, smooth=3):
+    """index.js:1808-1821 的「逐日路徑」版。
+
+    out[i] ＝ JS `kd(H[:i+1], L[:i+1], C[:i+1], n, smooth)`。
+    成立理由：JS 的 K/D 是自序列起點（初值 K=D=50）往前遞迴、與序列結尾無關，
+    因此整條路徑一次算完等於逐個前綴各算一次（parity 測試逐 index 驗證此等價）。
+    """
+    H, L, C = highs or [], lows or [], closes or []
+    out = [None] * len(C)
+    if len(C) < n:
+        return out
+    a = 1 / smooth
+    k = d = 50
+    for i in range(n - 1, len(C)):
+        hh, ll = -math.inf, math.inf
+        for j in range(i - n + 1, i + 1):
+            if H[j] > hh:
+                hh = H[j]
+            if L[j] < ll:
+                ll = L[j]
+        rng = hh - ll
+        rsv = 50 if rng == 0 else ((C[i] - ll) / rng) * 100
+        k = k * (1 - a) + rsv * a
+        d = d * (1 - a) + k * a
+        out[i] = dict(k=r2(k), d=r2(d))
+    return out
+
+
+def macd_path(closes, fast=12, slow=26, signal=9):
+    """index.js:1824-1836 的逐日路徑版。out[i] ＝ JS `macd(C[:i+1], ...)`。
+
+    EMA 種子在序列前段、之後純遞迴 → 前綴穩定，故整條算完可對應每個前綴。
+    JS 端的長度守門 `C.length < slow + signal` 對應 i < slow+signal-1。
+    """
+    C = closes or []
+    out = [None] * len(C)
+    if len(C) < slow + signal:
+        return out
+    ef, es = ema(C, fast), ema(C, slow)
+    dif = [(ef[i] - es[i]) if (ef[i] is not None and es[i] is not None) else None
+           for i in range(len(C))]
+    difvals = [x for x in dif if x is not None]      # 連續段，起點 index = slow-1
+    sig = ema(difvals, signal)
+    if not sig:
+        return out
+    for i in range(slow + signal - 1, len(C)):
+        m = i - (slow - 1)                            # difvals 內的位置
+        if m >= len(sig) or sig[m] is None:
+            continue
+        macd_line = sig[m]
+        macd_prev = sig[m - 1] if m >= 1 else None
+        dif_last = difvals[m]
+        dif_prev = difvals[m - 1] if m >= 1 else None
+        hist = dif_last - macd_line
+        hist_prev = (dif_prev - macd_prev) if (dif_prev is not None and macd_prev is not None) else None
+        out[i] = dict(dif=r2(dif_last), macd=r2(macd_line), hist=r2(hist),
+                      histPrev=None if hist_prev is None else r2(hist_prev))
+    return out
+
+
+def _rsi_val(avg_g, avg_l):
+    """index.js:1850-1852：全漲 100、全跌 0、無波動 50（這三個回傳值不過 r2）。"""
+    if avg_l == 0:
+        return 50 if avg_g == 0 else 100
+    if avg_g == 0:
+        return 0
+    return r2(100 - 100 / (1 + avg_g / avg_l))
+
+
+def rsi_path(closes, period=14):
+    """index.js:1839-1853 的逐日路徑版。out[i] ＝ JS `rsi(C[:i+1], period)`。
+
+    Wilder 平滑同樣是自序列起點遞迴（種子＝前 period 個變動的簡單平均）→ 前綴穩定。
+    注意生產用 period 5 與 10，非教科書的 14（index.js:1956）。
+    """
+    C = closes or []
+    out = [None] * len(C)
+    if len(C) < period + 1:
+        return out
+    gain = loss = 0.0
+    for i in range(1, period + 1):
+        ch = C[i] - C[i - 1]
+        if ch >= 0:          # 注意：JS 種子段是 ch >= 0 進 gain（與平滑段的 ch > 0 不同）
+            gain += ch
+        else:
+            loss -= ch
+    avg_g, avg_l = gain / period, loss / period
+    out[period] = _rsi_val(avg_g, avg_l)
+    for i in range(period + 1, len(C)):
+        ch = C[i] - C[i - 1]
+        avg_g = (avg_g * (period - 1) + (ch if ch > 0 else 0)) / period
+        avg_l = (avg_l * (period - 1) + (-ch if ch < 0 else 0)) / period
+        out[i] = _rsi_val(avg_g, avg_l)
+    return out
+
+
+def boll_path(closes, period=20, mult=2):
+    """index.js:1855-1865 的逐日路徑版。母體標準差（除以 period，非 period-1）。"""
+    C = closes or []
+    out = [None] * len(C)
+    for i in range(period - 1, len(C)):
+        w = C[i - period + 1:i + 1]
+        mid = sma(w, period)
+        v = 0.0
+        for x in w:
+            v += (x - mid) ** 2
+        sd = math.sqrt(v / period)
+        upper, lower, close = mid + mult * sd, mid - mult * sd, C[i]
+        rng = upper - lower
+        pb = 0.5 if rng == 0 else (close - lower) / rng
+        out[i] = dict(mid=r2(mid), upper=r2(upper), lower=r2(lower), pb=r2(pb))
+    return out
+
+
+def kd_state(cur, prev_k, prev_d):
+    """index.js:1898-1906。交叉優先於高/低檔區。"""
+    if prev_k is not None and prev_d is not None:
+        if prev_k <= prev_d and cur["k"] > cur["d"]:
+            return "黃金交叉（K 上穿 D）"
+        if prev_k >= prev_d and cur["k"] < cur["d"]:
+            return "死亡交叉（K 下穿 D）"
+    if cur["k"] > 80 and cur["d"] > 80:
+        return "高檔區（>80）"
+    if cur["k"] < 20 and cur["d"] < 20:
+        return "低檔區（<20）"
+    return "中性"
+
+
+def macd_state(m):
+    """index.js:1908-1917。"""
+    bar = "柱狀持平"
+    if m["histPrev"] is not None:
+        if m["histPrev"] <= 0 and m["hist"] > 0:
+            bar = "柱狀翻正（跨零軸）"
+        elif m["histPrev"] >= 0 and m["hist"] < 0:
+            bar = "柱狀翻負（跨零軸）"
+        elif abs(m["hist"]) < 0.05:
+            bar = "黏合（近零）"
+        else:
+            bar = "柱狀為正" if m["hist"] > 0 else "柱狀為負"
+    return f"{bar}；DIF {'零軸之上' if m['dif'] > 0 else '零軸之下'}"
+
+
+def boll_state(pb):
+    """index.js:1926-1931。"""
+    if pb is None:
+        return "資料不足"
+    if pb >= 1:
+        return "觸/破上軌"
+    if pb <= 0:
+        return "觸/破下軌"
+    return "中軌之上" if pb >= 0.5 else "中軌之下"
+
+
+def dump_indicators(series):
+    """供 test_alpha_parity.mjs 比對：逐 index 輸出全部指標與狀態描述。
+
+    series = {"h": [...], "l": [...], "c": [...]}（等長）。
+    """
+    H, L, C = series["h"], series["l"], series["c"]
+    kdp, mp = kd_path(H, L, C), macd_path(C)
+    r5, r10 = rsi_path(C, 5), rsi_path(C, 10)
+    bp = boll_path(C)
+    out = []
+    for i in range(len(C)):
+        cur, prev = kdp[i], (kdp[i - 1] if i > 0 else None)
+        m = mp[i]
+        out.append(dict(
+            i=i,
+            sma5=sma(C[:i + 1], 5), sma20=sma(C[:i + 1], 20),
+            kd=cur,
+            kd_state=(kd_state(cur, prev["k"] if prev else None,
+                               prev["d"] if prev else None) if cur else None),
+            macd=m,
+            macd_state=(macd_state(m) if m else None),
+            rsi5=r5[i], rsi10=r10[i],
+            boll=bp[i],
+            boll_state=(boll_state(bp[i]["pb"]) if bp[i] else None),
+        ))
+    return out
+
+
+# ════════════════════════════════════════════════════════════════
+# 二、訊號旗標建構（把 14 個訊號掛到 build_stock_samples 產出的樣本上）
+# ════════════════════════════════════════════════════════════════
+
+def attach_inst_signals(samples, diag):
+    """AS-01~04：法人同步／對作，當日強度前 TOP_N 名。
+
+    金額直接沿用樣本既有的 trust_buy_amt / foreign_buy_amt
+    （run_sorting.py:171-172，＝法人淨買股數×收盤/1000，千元；符號＝淨買方向）。
+    強度＝min(|外資額|,|投信額|)——與 taiwan-flows 對作頁「強度=min(雙方金額)」同義。
+    排序帶次鍵 code，避免同值時分組依輸入順序漂移（taiwan-flows 踩過的 tie-break 教訓）。
+    """
+    defs = [
+        ("AS-01", lambda t, f: t > 0 and f > 0),
+        ("AS-02", lambda t, f: t < 0 and f < 0),
+        ("AS-03", lambda t, f: f > 0 and t < 0),
+        ("AS-04", lambda t, f: t > 0 and f < 0),
+    ]
+    by_day = {}
+    for r in samples:
+        by_day.setdefault(r["d"], []).append(r)
+    for sid, pred in defs:
+        pool = []
+        for d in sorted(by_day):
+            cand = []
+            for r in by_day[d]:
+                t, f = r["trust_buy_amt"], r["foreign_buy_amt"]
+                if pred(t, f):
+                    cand.append((min(abs(t), abs(f)), r))
+            cand.sort(key=lambda x: (-x[0], x[1]["c"]))
+            for strength, r in cand[:TOP_N]:
+                r["sig"].add(sid)
+                pool.append(dict(v=strength))
+        diag[sid] = dict(cand=len(pool), tie=rs.max_tie_rate(pool, "v"))
+
+
+def attach_share_signals(samples, days, price, diag):
+    """AS-05/06：成交佔比的「佔週變」（pp）當日前/後 10%。
+
+    生產定義（index.html:261-268）：佔比＝個股當日成交額 ÷ 該市場當日全個股成交額；
+    上週佔＝個股上週成交額 ÷ 市場上週成交額；佔週變＝兩者相減（pp）。
+    回測沒有 lastweek.json 那種「自然週」聚合，改用**滾動前 5 交易日**當「上週」基準
+    ——與本 repo 既有回測的 5 日基準一致（run_sorting.py:122-123 的 a5）。
+    分母沿用 run_sorting.build_sector_samples:202-205 的市場總額（排除 ETF 與 _TAIEX），
+    不分上市/上櫃（回測母體本來就跨市場排序）。
+    """
+    idx = {d: t for t, d in enumerate(days)}
+    mkt_tot = []
+    for d in days:
+        mkt_tot.append(sum(rs.fv(r[0]) or 0 for c, r in price[d].items()
+                           if c != "_TAIEX" and not c.startswith("00")))
+    by_day = {}
+    for r in samples:
+        t = idx[r["d"]]
+        if t < 5 or not mkt_tot[t]:
+            continue
+        num = den = 0.0
+        ok = True
+        for k in range(1, 6):
+            row = price[days[t - k]].get(r["c"])
+            a = rs.fv(row[0]) if row else None
+            if a is None or not mkt_tot[t - k]:
+                ok = False
+                break
+            num += a
+            den += mkt_tot[t - k]
+        if not ok or den <= 0:
+            continue
+        chg = (r["amt"] / mkt_tot[t] - num / den) * 100    # pp
+        r["share_chg"] = chg
+        by_day.setdefault(r["d"], []).append(r)
+
+    pool_hi, pool_lo = [], []
+    for d in sorted(by_day):
+        rows = sorted(by_day[d], key=lambda r: (-r["share_chg"], r["c"]))
+        k = int(len(rows) * DECILE)                        # 不足 10 檔 → 當日不取樣
+        for r in rows[:k]:
+            r["sig"].add("AS-05")
+            pool_hi.append(dict(v=r["share_chg"]))
+        for r in rows[len(rows) - k:] if k else []:
+            r["sig"].add("AS-06")
+            pool_lo.append(dict(v=r["share_chg"]))
+    diag["AS-05"] = dict(cand=len(pool_hi), tie=rs.max_tie_rate(pool_hi, "v"))
+    diag["AS-06"] = dict(cand=len(pool_lo), tie=rs.max_tie_rate(pool_lo, "v"))
+
+
+def attach_technical_signals(samples, days, price, diag):
+    """AS-07~14：KD／MACD／RSI／布林，指標與狀態描述全部走 Worker 移植函式。
+
+    每檔股票的指標序列只用「該檔實際有價格列的交易日」，與生產的 buildSeries
+    （index.js:1940-1945，過濾 close==null 後升冪）同語意。
+    """
+    by_cd = {(r["c"], r["d"]): r for r in samples}
+    codes = sorted({r["c"] for r in samples})
+    cnt = {s: 0 for s in ("AS-07", "AS-08", "AS-09", "AS-10",
+                          "AS-11", "AS-12", "AS-13", "AS-14")}
+    for c in codes:
+        sd, H, L, C = [], [], [], []
+        for d in days:
+            row = price[d].get(c)
+            if not row:
+                continue
+            h, lo, cl = rs.fv(row[2]), rs.fv(row[3]), rs.fv(row[4])
+            if h is None or lo is None or cl is None:
+                continue
+            sd.append(d)
+            H.append(h)
+            L.append(lo)
+            C.append(cl)
+        if not C:
+            continue
+        kdp, mp, r5, bp = kd_path(H, L, C), macd_path(C), rsi_path(C, 5), boll_path(C)
+        for i, d in enumerate(sd):
+            r = by_cd.get((c, d))
+            if r is None:
+                continue
+            cur = kdp[i]
+            if cur:
+                prev = kdp[i - 1] if i > 0 else None
+                stt = kd_state(cur, prev["k"] if prev else None, prev["d"] if prev else None)
+                if stt.startswith("黃金交叉") and cur["k"] < 50:
+                    r["sig"].add("AS-07")
+                if stt.startswith("死亡交叉") and cur["k"] > 50:
+                    r["sig"].add("AS-08")
+            m = mp[i]
+            if m:
+                stt = macd_state(m)
+                if stt.startswith("柱狀翻正"):
+                    r["sig"].add("AS-09")
+                if stt.startswith("柱狀翻負"):
+                    r["sig"].add("AS-10")
+            v5 = r5[i]
+            if v5 is not None:
+                if v5 < 20:
+                    r["sig"].add("AS-11")
+                if v5 > 80:
+                    r["sig"].add("AS-12")
+            b = bp[i]
+            if b:
+                stt = boll_state(b["pb"])
+                if stt == "觸/破上軌":
+                    r["sig"].add("AS-13")
+                if stt == "觸/破下軌":
+                    r["sig"].add("AS-14")
+    for r in samples:
+        for s in cnt:
+            if s in r["sig"]:
+                cnt[s] += 1
+    for s, n in cnt.items():
+        diag[s] = dict(cand=n, tie=None)
+
+
+def attach_all(samples, days, price):
+    """把 14 個訊號旗標掛上樣本，回排序欄診斷 dict。"""
+    for r in samples:
+        r["sig"] = set()
+    diag = {}
+    attach_inst_signals(samples, diag)
+    attach_share_signals(samples, days, price, diag)
+    attach_technical_signals(samples, days, price, diag)
+    return diag
+
+
+# ════════════════════════════════════════════════════════════════
+# 三、評估（預註冊書 §1.2~§1.6）
+# ════════════════════════════════════════════════════════════════
+
+def daily_series(rows):
+    """§1.3 第二層：每個訊號日先取當日訊號股 e3 平均 → 逐日平均超額序列。"""
+    by_d = {}
+    for r in rows:
+        by_d.setdefault(r["d"], []).append(r["e3"])
+    return [(d, st.mean(by_d[d])) for d in sorted(by_d)]
+
+
+def split_index(days):
+    """§1.4：交易日清單依索引對半切（不指定日期，由程式執行時算）。"""
+    return len(days) // 2
+
+
+def evaluate_signal(rows, days):
+    """回一個訊號的全部統計與判準結果（不含分層，見 classify_tier）。"""
+    cut = split_index(days)
+    first = set(days[:cut])
+    s = rs.stat(rows)
+    ser = daily_series(rows)
+    h1 = rs.stat([r for r in rows if r["d"] in first])
+    h2 = rs.stat([r for r in rows if r["d"] not in first])
+    day_avg = st.mean(v for _, v in ser) * 100 if ser else None
+    res = dict(
+        n=s["n"] if s else 0,
+        stat=s,
+        e1_avg=(st.mean(r["e1"] for r in rows) * 100) if rows else None,
+        e3_avg=s["e3_avg"] if s else None,
+        day_n=len(ser),
+        day_avg=day_avg,
+        day_pos=(sum(1 for _, v in ser if v > 0) / len(ser) * 100) if ser else None,
+        h1=h1, h2=h2,
+        cut_day=(days[cut - 1] if cut else None),
+        next_day=(days[cut] if cut < len(days) else None),
+    )
+    e3 = res["e3_avg"]
+    res["c_n"] = res["n"] >= MIN_N_FULL
+    res["c_eff"] = e3 is not None and abs(e3) >= MIN_ABS_E3
+    res["c_half_n"] = bool(h1 and h2 and h1["n"] >= MIN_N_HALF and h2["n"] >= MIN_N_HALF)
+    res["c_half_sign"] = bool(h1 and h2 and (h1["e3_avg"] > 0) == (h2["e3_avg"] > 0))
+    res["c_day_sign"] = bool(day_avg is not None and e3 is not None
+                             and (day_avg > 0) == (e3 > 0))
+    # §1.4 存活＝前後兩段同號 且 各段 N≥200
+    res["survive_half"] = res["c_half_n"] and res["c_half_sign"]
+    return res
+
+
+def classify_tier(res):
+    """§1.6 三層。
+
+    判準逐條照 §1.5，不加不減。§1.6 的 B 層字面是「效果量夠但切半不同號」——
+    表格未窮舉「效果量夠但全期 N 不足／日層級不同號」這兩種組合，本檔一律歸 B
+    並在報告逐條標出實際未過的判準（歸 A 太寬、歸 C 會與「未達效果量門檻」的
+    C 層定義矛盾）。這是實作判斷，不是判準變更。
+    """
+    if not res["c_eff"]:
+        return "C"
+    if (res["c_n"] and res["survive_half"] and res["c_day_sign"]):
+        return "A"
+    return "B"
+
+
+def dir_match(sig, res):
+    """預期方向是否相符。雙邊訊號回 None（§2 前言：方向不明者明列為雙邊並計 2 次）。"""
+    if sig["dir"] == "both" or res["e3_avg"] is None:
+        return None
+    return res["e3_avg"] > 0 if sig["dir"] == "long" else res["e3_avg"] < 0
+
+
+# ════════════════════════════════════════════════════════════════
+# 四、報告
+# ════════════════════════════════════════════════════════════════
+
+def doc_commit():
+    """預註冊書的 commit hash 與時間（§4.4：報告開頭標明，供人核對先註冊後測）。"""
+    try:
+        p = subprocess.run(["git", "log", "-1", "--format=%H %cI", "--", str(DOC)],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=15)
+        info = p.stdout.strip() or "（查無 commit 紀錄）"
+        d = subprocess.run(["git", "status", "--porcelain", "--", str(DOC)],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=15)
+        return info, bool(d.stdout.strip())
+    except Exception as e:                                   # noqa: BLE001
+        return f"（無法取得：{e}）", False
+
+
+def _p(v, unit="%"):
+    return "N/A" if v is None else f"{v:+.2f}{unit}"
+
+
+def render_signal(sig, res, diag, lines):
+    lines.append(f"\n## {sig['id']}　{sig['desc']}")
+    lines.append(f"來源：{sig['src']}　預期方向：{DIR_LABEL[sig['dir']]}"
+                 f"　檢定次數：{sig['weight']}")
+    if not res["n"]:
+        lines.append("**無樣本**（此訊號在本期快取內從未觸發）")
+        lines.append("**分層**：C（陰性；無樣本，未達效果量門檻）")
+        lines.append("")
+        return
+    lines.append(rs.fmt("  pooled 全期", res["stat"]))
+    lines.append(f"  （描述用，不列判準）T+1 超額 e1 平均 {_p(res['e1_avg'])}")
+    lines.append(f"  日層級：訊號日 {res['day_n']} 天　逐日平均超額 {_p(res['day_avg'])}"
+                 f"　正報酬日佔比 {res['day_pos']:.1f}%")
+    lines.append(rs.fmt("  前半段", res["h1"]))
+    lines.append(rs.fmt("  後半段", res["h2"]))
+    d = diag.get(sig["id"]) or {}
+    if d.get("tie") is not None:
+        flag = "（> 上限，排序欄無有效變異）" if d["tie"] > rs.MAX_TIE_RATE else ""
+        lines.append(f"  排序欄診斷：候選 {d['cand']} 筆　最大平手率 {d['tie'] * 100:.1f}%{flag}")
+    dm = dir_match(sig, res)
+    lines.append("  判準逐條（§1.5）：")
+    lines.append(f"    [{'✓' if res['c_n'] else '✗'}] 全期 N ≥ {MIN_N_FULL}（實際 {res['n']}）")
+    lines.append(f"    [{'✓' if res['c_eff'] else '✗'}] 全期 |e3 平均| ≥ {MIN_ABS_E3:.2f}%"
+                 f"（實際 {abs(res['e3_avg']):.2f}%）")
+    lines.append(f"    [{'✓' if res['c_half_n'] else '✗'}] 前後半各自 N ≥ {MIN_N_HALF}"
+                 f"（{res['h1']['n'] if res['h1'] else 0} / {res['h2']['n'] if res['h2'] else 0}）")
+    lines.append(f"    [{'✓' if res['c_half_sign'] else '✗'}] 切半同號"
+                 f"（{_p(res['h1']['e3_avg']) if res['h1'] else 'N/A'} /"
+                 f" {_p(res['h2']['e3_avg']) if res['h2'] else 'N/A'}）")
+    lines.append(f"    [{'✓' if res['c_day_sign'] else '✗'}] 逐日平均超額與 pooled 同號"
+                 f"（{_p(res['day_avg'])} / {_p(res['e3_avg'])}）")
+    tier = classify_tier(res)
+    note = {"A": "存活", "B": "半段活／穩健性未過（疑似過擬合，不做卡）", "C": "陰性"}[tier]
+    lines.append(f"**分層**：{tier}（{note}）")
+    if dm is None:
+        lines.append("  方向：雙邊檢定，兩種符號皆在預註冊範圍內。")
+    elif dm:
+        lines.append("  方向：與預註冊方向相符。")
+    else:
+        lines.append("  方向：**與預註冊方向相反**——依 §2 前言不得改稱反向訊號，"
+                     "此結果只能記為該方向的證據不足。")
+    lines.append("\n### 逐月")
+    rows_fmt = rs.fmt if sig["dir"] != "short" else rs.fmt_dn
+    monthly_rows = res.get("_rows")
+    if monthly_rows:
+        rs.monthly(monthly_rows, rows_fmt, lines)
+    lines.append("")
+
+
+def build_report(days, samples, results, diag, doc_info, dirty):
+    cut = split_index(days)
+    ctrl = [r for r in samples if r["surge"] < 1.2 or abs(r["ret"]) < 0.01]
+    lines = [
+        "# 全站 Alpha 盤點掃描報告（第一階段）",
+        "",
+        f"依 `docs/alpha-sweep-preregistration.md` 執行；該文件 commit：`{doc_info}`"
+        + ("　**⚠ 工作區中該文件有未 commit 的修改，先註冊後測的憑據不完整**" if dirty else ""),
+        "",
+        f"> 本次共檢定 {K_TESTS} 個訊號。若全部為無效訊號，在名目 5% 水準下預期仍有約 "
+        f"{0.05 * K_TESTS:.1f} 個會偶然「看起來有效」。請據此對 A 層結果打折。",
+        "",
+        f"（K＝{K_TESTS} 由候選清單自動帶入：{len(SIGNALS)} 列，其中 "
+        f"{sum(1 for s in SIGNALS if s['dir'] == 'both')} 列為雙邊檢定各計 2。）",
+        "",
+        f"期間 {days[0]} ~ {days[-1]}（{len(days)} 交易日）"
+        f"· 流動性 ≥ {rs.LIQ / 1e8:.0f} 億 · 排除 ETF/興櫃 · 收盤對收盤、未除權息調整",
+        f"個股 stock-day 樣本：{len(samples):,}",
+        f"切半：依交易日索引對半切（非人工指定日期）——前段 {days[0]} ~ {days[cut - 1]}"
+        f"（{cut} 日）、後段 {days[cut]} ~ {days[-1]}（{len(days) - cut} 日）",
+        "",
+        "## 主要結果變數",
+        "T+3 對 TAIEX 超額（`e3`）為唯一主要指標；T+1（`e1`）只作描述用途、不列入採用判準（§1.2）。",
+        "不報 p 值：stock-day 樣本同一天內高度相關，當獨立樣本算 p 值會把顯著性灌到離譜（§1.3）。",
+        "改用兩層：pooled 效果量 ＋ 日層級序列（每個訊號日先取當日訊號股 e3 平均）。",
+        "",
+        "## 採用門檻（§1.5，先訂）",
+        "| 判準 | 門檻 |",
+        "|---|---|",
+        f"| 全期 N | ≥ {MIN_N_FULL} |",
+        f"| 前後半各自 N | ≥ {MIN_N_HALF} |",
+        f"| 全期 \\|e3 平均\\| | ≥ {MIN_ABS_E3:.2f}% |",
+        "| 切半同號 | 必須 |",
+        "| 逐日平均超額與 pooled 同號 | 必須 |",
+        "",
+        "## 對照組基準（§1.1：同流動性、明確無訊號）",
+        rs.fmt("對照組 surge<1.2 或 |ret|<1%", rs.stat(ctrl)),
+        "",
+        "## 已知偏差（§2.2，必須隨結果一起讀）",
+    ]
+    for i, b in enumerate(KNOWN_BIASES, 1):
+        lines.append(f"{i}. {b}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("# 訊號逐項結果（14 列，與預註冊書 §2.1 逐項對應）")
+
+    for sig in SIGNALS:
+        render_signal(sig, results[sig["id"]], diag, lines)
+
+    lines.append("---")
+    lines.append("")
+    lines.append("# 三層總表（§1.6）")
+    tiers = {"A": [], "B": [], "C": []}
+    for sig in SIGNALS:
+        tiers[classify_tier(results[sig["id"]])].append(sig)
+    head = ("| 訊號 | 定義 | 方向 | N | e3 平均 | 日層級平均 | 正報酬日 | 前半 e3 | 後半 e3 |"
+            "\n|---|---|---|---:|---:|---:|---:|---:|---:|")
+    titles = {
+        "A": "## A. 存活（全部門檻通過）— 候選做卡，但仍需單獨複驗",
+        "B": "## B. 半段活（效果量夠，但穩健性門檻未全過）— 疑似過擬合，**不做卡**",
+        "C": "## C. 陰性（未達效果量門檻）— 照實列出，一項不漏",
+    }
+    for t in ("A", "B", "C"):
+        lines.append("")
+        lines.append(titles[t])
+        if not tiers[t]:
+            lines.append("（本層無訊號）")
+            continue
+        lines.append(head)
+        for sig in tiers[t]:
+            r = results[sig["id"]]
+            desc = sig["desc"].replace("|", "\\|")     # AS-01 的 min(|…|,|…|) 會拆掉表格欄
+            pos = "N/A" if r["day_pos"] is None else f"{r['day_pos']:.1f}%"
+            h1 = _p(r["h1"]["e3_avg"]) if r["h1"] else "N/A"
+            h2 = _p(r["h2"]["e3_avg"]) if r["h2"] else "N/A"
+            lines.append(
+                f"| {sig['id']} | {desc} | {DIR_LABEL[sig['dir']]} | {r['n']} |"
+                f" {_p(r['e3_avg'])} | {_p(r['day_avg'])} | {pos} | {h1} | {h2} |")
+
+    opposite = [s["id"] for s in SIGNALS
+                if classify_tier(results[s["id"]]) == "A" and dir_match(s, results[s["id"]]) is False]
+    lines.extend([
+        "",
+        "---",
+        "",
+        "# 注意事項",
+        "- 收盤對收盤報酬，未含交易成本/滑價；股價未除權息調整（7-8 月除息季偏多）。",
+        "- 個股名單以目前 classify 為準，期間內下市股不在樣本（輕微存活偏差）。",
+        "- A 層結果不直接進圖卡規格；每一個要單獨複驗（獨立 subagent、fresh context）後才進（§4.3）。",
+        "- 本報告未做分位（quintile）分析：預註冊書未列，臨時加會增加實際檢定次數，"
+        "與 §1.7 的多重比較揭露互相矛盾。排序欄只印平手率診斷。",
+        "- 指標定義沿用 Worker 生產純函式（`worker/src/index.js:1787-1888`、狀態描述 :1898-1931）"
+        "的 Python 移植；兩份實作的一致性由 `backtest/test_alpha_parity.mjs` 逐 index 比對守門。",
+    ])
+    if opposite:
+        lines.append(f"- ⚠ A 層中 {'、'.join(opposite)} 的超額符號與預註冊方向相反。"
+                     "依 §2 前言，不得事後改稱反向訊號。")
+    return lines
+
+
+# ════════════════════════════════════════════════════════════════
+# 五、主程式
+# ════════════════════════════════════════════════════════════════
+
+def main():
+    print("載入快取資料...", flush=True)
+    days, price, inst, _cl = rs.load()
+    if not days:
+        print("backtest/cache/ 沒有快取（需先跑 backtest/fetch.py）", file=sys.stderr)
+        return 1
+    print(f"交易日 {len(days)} 天（{days[0]} ~ {days[-1]}）")
+
+    print("建構個股樣本...", flush=True)
+    samples, _tx, _ma = rs.build_stock_samples(days, price, inst)
+    print(f"個股 stock-day 樣本：{len(samples):,}")
+
+    print("掛訊號旗標（14 個候選）...", flush=True)
+    diag = attach_all(samples, days, price)
+
+    results = {}
+    for sig in SIGNALS:
+        rows = [r for r in samples if sig["id"] in r["sig"]]
+        res = evaluate_signal(rows, days)
+        res["_rows"] = rows
+        results[sig["id"]] = res
+        print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
+              f"→ {classify_tier(res)}", flush=True)
+
+    doc_info, dirty = doc_commit()
+    lines = build_report(days, samples, results, diag, doc_info, dirty)
+    OUT.write_text("\n".join(lines), encoding="utf-8")
+    print(f"\n已寫 {OUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
