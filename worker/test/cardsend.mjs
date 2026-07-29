@@ -232,6 +232,20 @@ const FULL = () => ({
   chk("全通道失敗 → flex 與 text 各試過一次", lineCalls(spy).length === 2);
 }
 
+// ---- ⑨b LINE 全敗但 webhook 成功 → 仍寫 KV（一晚一推）、但主通道失守要發告警 ----
+{
+  const spy = [];
+  const kv = fakeKV();
+  const env = { ...ENV_LINE, ALERT_WEBHOOK: WEBHOOK, FLOW_KV: kv };
+  const out = await pushDailyCards(env, TP, mkFetch(FULL(), spy, { lineFailAll: true }));
+  chk("LINE敗+webhook成 → 有送達（via=webhook）", out.sent && out.via.includes("webhook")
+    && !out.via.some((v) => v.startsWith("line")), JSON.stringify(out.via));
+  chk("LINE敗+webhook成 → 去重鍵已寫（一晚一推）", kv._m.get(DEDUP_KEY) === "pushed");
+  chk("LINE敗+webhook成 → 主通道失守告警已發（cards-line-err）",
+    kv._m.has(`alerted:${TP.date.replaceAll("-", "")}:cards-line-err`),
+    [...kv._m.keys()].join(","));
+}
+
 // ---- ⑩ fetchCardSources：單支獨立失敗給 null、getProduct 快取可注入 ----
 {
   const spy = [];
