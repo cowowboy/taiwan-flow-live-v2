@@ -1073,6 +1073,14 @@ export async function runEvening(env, tp, fetchFn = fetch, opts = {}) {
   }
   try { out.aetf2 = await runAetf2(env, tp, fetchFn, opts); }
   catch (e) { out.aetf2 = { error: String((e && e.message) || e) }; }
+  // Phase B2 附加步驟：盤後圖卡推播（pushDailyCards 內建 台北≥22:30 時間守門＋KV 去重＋
+  // baseline 交易日守門；21:00–22:25 的喚醒零成本略過）。整步 try/catch——失敗只告警
+  // （tag cards-err，勿與去重鍵 alerted:<date>:cards 同名相撞），絕不影響上面既有 evening 鏈。
+  try { out.cards = await pushDailyCards(env, tp, fetchFn, { ...opts, getProduct: getP }); }
+  catch (e) {
+    out.cards = { error: String((e && e.message) || e) };
+    await alertJob(env, tp, "cards-err", `❌ 盤後圖卡：${out.cards.error}（KV 未記，下輪自動重試）`, fetchFn);
+  }
   return out;
 }
 
@@ -1827,6 +1835,132 @@ export function buildDailyCards(src) {
     } catch (e) { skipped.push({ id, reason: String((e && e.message) || e) }); }
   }
   return { cards, skipped };
+}
+
+// ---- LINE 圖卡發送層＋排程接線（Phase B2，2026-07-29，規格：docs/line-cards-spec.md 第 5/9 節）----
+// 不改 wrangler.toml cron：evening 班（台北 21:00–23:55 每 5 分）已涵蓋 22:30–23:00 推播窗，
+// 發送做成 runEvening 內「附加」的一步：程式端時間守門（台北 ≥22:30）＋KV 去重
+// `alerted:<date>:cards`（沿用 alertJob 的鍵型與 ALERTED_TTL）確保一晚只推一次。
+// 發送失敗不寫 KV → 下一輪（5 分後）自動重試，同 sentinel 慣例。
+const FLOWS_RAW_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main";
+export const CARDS_PUSH_AFTER_MIN = 22 * 60 + 30;   // 台北 22:30（規格 9.1.1 推播窗下緣）
+// LINE text message 官方上限 5000 字（messaging-api reference #text-message）；
+// 33 卡純文字降級版可能貼近上限，保守截 4900 保整則可發（截尾勝於整則 400 不發）
+const CARDS_TEXT_MAX = 4900;
+// 13 支來源 URL（規格第 9 節逐卡對應表的來源集合；flowsDaily 按日命名）。
+// base 全用既有常數／慣例：env.DATA_BASE（本 repo data/）、POSTMKT_BASE、flows raw main。
+export function cardSourceUrls(env, dateISO) {
+  const V2 = env.DATA_BASE;
+  return {
+    daysummary:     `${V2}/daysummary/latest.json`,
+    baseline:       `${V2}/baseline.json`,
+    morning:        `${V2}/morning.json`,
+    us:             `${V2}/us.json`,
+    lastweek:       `${V2}/lastweek.json`,
+    aetfLatest:     `${V2}/aetf/latest.json`,
+    aetfDiff:       `${V2}/aetf/diff.json`,
+    flowsLatest:    `${FLOWS_RAW_BASE}/data/latest.json`,
+    totals:         `${FLOWS_RAW_BASE}/data/totals.json`,
+    foreignHistory: `${FLOWS_RAW_BASE}/data/foreign_history.json`,
+    flowsDaily:     `${FLOWS_RAW_BASE}/data/daily/${dateISO.replaceAll("-", "")}.json`,
+    postmkt:        `${POSTMKT_BASE}/data/postmkt.json`,
+    mktbal:         `${POSTMKT_BASE}/data/market_balance_history.json`,
+  };
+}
+// fetch 編排：13 支各自獨立 try/catch，失敗給 null（buildDailyCards 對 null 源已能逐卡降級）。
+// opts.getProduct 沿用 runEvening 的 getP 快取——postmkt.json（2.4MB）若 summary 步同一次
+// 喚醒已抓過，這裡直接吃快取不重抓（快取鍵＝原始 URL，fetchProduct 的 cache-buster 不影響）。
+// VIX 走既有 finFuturesVix（其內部用全域 fetch、非注入式）——僅在 FINMIND_TOKEN 有設時打，
+// 失敗給 null（v2-global-1 顯「—」不擋卡）；離線測試不設 token 即零真實網路。
+export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
+  const getP = opts.getProduct || ((u) => fetchProduct(u, fetchFn).catch(() => null));
+  const urls = cardSourceUrls(env, tp.date);
+  const src = { dateStr: tp.date, vix: null };
+  await Promise.all(Object.entries(urls).map(async ([k, u]) => {
+    try { src[k] = await getP(u); } catch { src[k] = null; }
+  }));
+  if (env.FINMIND_TOKEN) {
+    try { src.vix = await finFuturesVix(env.FINMIND_TOKEN, tp.date); }
+    catch (e) { console.log("cards vix:", e && e.message); }
+  }
+  return src;
+}
+// 發送流程（規格 5 節＋任務 B2 定案）：時間守門 → 通道守門 → KV 去重 → 抓源 →
+// baseline 交易日守門 → 組卡＋assertCardAllowed 縱深過濾 → 0 卡記 skip →
+// LINE Flex（失敗退純文字）＋ webhook（固定純文字）→ 任一通道成功才寫 KV。
+// 全通道失敗 → 拋錯（不寫 KV，下輪自動重試；接線層負責 alertJob 告警）。
+export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
+  // ① 時間守門：evening 班 21:00 起每 5 分醒，22:30 前一律不動作（零 fetch 零 KV 讀）
+  if (tp.hour * 60 + tp.minute < CARDS_PUSH_AFTER_MIN) return { name: "cards", waiting: "before-22:30" };
+  // ② 通道守門：兩通道皆未設 → 靜默（同 sendAlert 慣例，不打任何外部請求）
+  const hasLine = !!(env.LINE_TOKEN && env.LINE_USER_ID);
+  if (!hasLine && !env.ALERT_WEBHOOK) return { name: "cards", skipped: "no-channel" };
+  // ③ KV 去重：一晚只推一次（值 pushed／skip-empty，事後查 KV 可分辨當晚結局）
+  const key = alertedKey(tp.date, "cards");
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "cards", skipped: "already-pushed" };
+  // ④ 抓源＋交易日守門：baseline 週末/假日不更新，date 非台北今日即自然跳過。
+  //    不寫 KV——交易日 baseline 若只是遲到，下輪 5 分後再看（23:55 窗尾自然截止）
+  const src = await fetchCardSources(env, tp, fetchFn, opts);
+  if (!src.baseline || String(src.baseline.date || "").slice(0, 10) !== tp.date)
+    return { name: "cards", skipped: "baseline-not-today",
+      baselineDate: src.baseline ? String(src.baseline.date || "") : null };
+  // ⑤ 組卡＋縱深防禦：buildDailyCards 產物理論上已乾淨，這裡逐卡再過 assertCardAllowed
+  //    一次——過不了的整張剔除記 log，不擋其他卡（規格 9.3 發送層驗收條件）
+  const built = buildDailyCards(src);
+  const cards = [], dropped = [];
+  for (const c of built.cards) {
+    try { assertCardAllowed(c); cards.push(c); }
+    catch (e) {
+      dropped.push({ id: c.id, reason: String((e && e.message) || e) });
+      console.log("cards 預過濾剔除:", c.id, e && e.message);
+    }
+  }
+  if (opts.dry) return { name: "cards", wouldPush: cards.length,
+    skippedCards: built.skipped.length, dropped: dropped.length };
+  // ⑥ 0 卡不推：寫 KV 記 skip 後短路（0 卡之夜後續喚醒不再白抓 13 支）
+  if (!cards.length) {
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, "skip-empty", { expirationTtl: ALERTED_TTL });
+    return { name: "cards", skipped: "no-cards",
+      skippedCards: built.skipped.length, dropped: dropped.length };
+  }
+  // ⑦ 發送：LINE Flex → 建構或推送拋錯退 cardsFallbackText 純文字再試一次（規格 5.3：
+  //    不可因版型錯誤整則不發）；webhook 通道固定送純文字版（Flex 只有 LINE 認得）
+  const fallback = cardsFallbackText(cards, tp.date).slice(0, CARDS_TEXT_MAX);
+  const sentVia = [], errs = [];
+  const post = async (label, { url, init }) => {
+    const r = await fetchFn(url, init);
+    if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
+  };
+  if (hasLine) {
+    try {
+      const messages = buildCardCarousels(cards, "股市雷達 盤後圖卡");
+      messages.forEach((m, i) => {   // altText 帶序號：盤後圖卡 N/M（任務 4g）
+        m.altText = `股市雷達 盤後圖卡 ${i + 1}/${messages.length}｜${tp.date}`.slice(0, 1500);
+      });
+      await post("LINE flex", lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, messages));
+      sentVia.push("line-flex");
+    } catch (e) {
+      errs.push(`line-flex: ${String((e && e.message) || e)}`);
+      try {
+        await post("LINE text", lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, fallback));
+        sentVia.push("line-text");
+      } catch (e2) { errs.push(`line-text: ${String((e2 && e2.message) || e2)}`); }
+    }
+  }
+  if (env.ALERT_WEBHOOK) {
+    try { await post("webhook", webhookRequest(env.ALERT_WEBHOOK, fallback)); sentVia.push("webhook"); }
+    catch (e) { errs.push(`webhook: ${String((e && e.message) || e)}`); }
+  }
+  // ⑧ 全通道失敗 → 拋錯、不寫 KV（下輪重試）。任一成功即寫 KV——單鍵去重下不寫的話，
+  //    已成功的通道下輪會重複推（LINE 一晚一推是硬約束）；代價是失敗的次要通道當晚
+  //    不再補送，errors 帶回結果供 jobstat/告警查。
+  if (!sentVia.length) throw new Error(`圖卡推播全通道失敗：${errs.join("；")}`);
+  if (env.FLOW_KV) await env.FLOW_KV.put(key, "pushed", { expirationTtl: ALERTED_TTL });
+  const out = { name: "cards", sent: true, via: sentVia, cards: cards.length,
+    skippedCards: built.skipped.length };
+  if (dropped.length) out.dropped = dropped.length;
+  if (errs.length) out.errors = errs;
+  return out;
 }
 
 // /line/webhook：LINE 平台事件進來時擷取 source.userId 存 KV（單 key line:uid，變化才寫）。
