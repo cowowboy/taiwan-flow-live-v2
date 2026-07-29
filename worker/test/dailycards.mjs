@@ -36,6 +36,7 @@ const FIX = () => ({
       "2330": [5e10, 0, 1, 0, 0, 3.2, 0, 0, 1, 4.5e10], // 突破新高
       "3481": [8e8, 0, 0, 0, 0, -1.0, 1, 0, 0, 1e9],    // 跌破新低
       "6669": [6e9, 1, 0, -1, 0, -12.5, 0, 2, 0, 5e9],  // 退出＋法人賣
+      "9997": [3e7, 2, 2, 1, 0, 89.4, 0, 0, 1, 2.5e7],  // 冷門股：全訊號命中但當日額<1億，必須被流動性過濾擋下
     },
     subs_y: { "運算設備": [1, 0, 2.1, 0.034], "晶圓製造": [1, 1, 1.8, 0.021], "金屬零件": [-1, 0, null, null] },
   },
@@ -49,6 +50,7 @@ const FIX = () => ({
       ["2330", 2340, -2.9, 60000, 140000000, 0, 0, -190, -446500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       ["3481", 49.5, -3.0, 20000, 990000, 0, 0, -100, -49500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       ["6669", 3950, -1.5, 3000, 11850000, -50, -197500, -200, -790000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      ["9997", 30, 5.0, 100, 30000, 10, 300, 50, 1500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ],
   },
   totals: mkTotals(),
@@ -317,6 +319,27 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const b = JSON.stringify(buildDailyCards(fx));
   chk("同輸入兩次輸出 byte-identical", a === b);
   chk("不竄改輸入物件", JSON.stringify(fx) === snap);
+}
+
+// ---- 7b. 流動性過濾：卡面鏡像回測母體（2026-07-29 首晚實推抓到的缺漏）----
+// 冷門股 9997 全訊號命中（y1=1、it/fi≥2、nh=1、ints=89.4）但當日額 3 千萬 <1 億，
+// 回測母體（LIQ=1e8）根本不含它——修正前它會以灌爆的 ints 佔據卡 3 榜首。
+{
+  const out = buildDailyCards(FIX());
+  const byId = Object.fromEntries(out.cards.map((c) => [c.id, c]));
+  for (const id of ["sig-new-high", "sig-dual-buy", "sig-surge-warn"]) {
+    const card = byId[id];
+    chk(`${id} 不含冷門股 9997`, card && !card.rows.some((r) => r.l === "9997"),
+      card && card.rows.map((r) => r.l).join(","));
+  }
+  chk("卡3 流動股 2330 仍在", byId["sig-new-high"].rows.some((r) => r.l === "2330"));
+  // flows 缺時退 a5 近似：卡3 仍擋 9997（a5=3e7）、留 2330（a5=5e10）
+  const fx2 = FIX(); fx2.flowsDaily = null;
+  const out2 = buildDailyCards(fx2);
+  const nh2 = out2.cards.find((c) => c.id === "sig-new-high");
+  chk("flows 缺→a5 後備仍擋 9997、留 2330",
+    nh2 && !nh2.rows.some((r) => r.l === "9997") && nh2.rows.some((r) => r.l === "2330"),
+    nh2 && nh2.rows.map((r) => r.l).join(","));
 }
 
 // ---- 8. 形狀壞的源不得全滅（B1 驗收 A2 缺口的回歸測試）----

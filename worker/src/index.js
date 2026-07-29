@@ -1488,11 +1488,21 @@ function fxCardSubSurge(s, ctx) {   // 卡1 次產業湧入：subs_y y1==1，依
   return { title: "次產業湧入", sub: `資料日 ${b.date}`, rows,
     note: ["依成員等權漲跌 R 降序，歷史分離度 0.97%、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
 }
+// 回測母體＝訊號日成交額 ≥1 億（run_sorting.py LIQ=1e8）。個股訊號卡（2-6）必須鏡像
+// 同一過濾，否則低流動股的比率型欄位（ints 等）天然灌爆、榜面被冷門股佔據
+// （2026-07-29 首晚實推即中此雷）。首選 flowsDaily 當日 amt（千元＝回測同口徑），
+// flows 缺時退 baseline a5（5日均額，元）近似。
+const fxLiqOk = (ctx, code, a) => {
+  const amt = ctx.flows ? ctx.flows.get(code, "amt") : null;
+  if (amt != null) return amt * 1000 >= 1e8;
+  return ((a && a[0]) || 0) >= 1e8;
+};
 function fxCardDualBuy(s, ctx) {    // 卡2 土洋同買：y1==1 ∩ it≥2 ∩ fi≥2，依 flowsDaily f_amt 降序
   if (ctx.regime.regime === "bear") return { skip: "regime-bear" };
   const b = fxNeed(s.baseline, "baseline");
   const fl = fxNeed(ctx.flows, "flowsDaily");
-  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === 1 && a[1] >= 2 && a[2] >= 2);
+  const hits = Object.entries(b.stocks || {}).filter(([c, a]) =>
+    a && a[3] === 1 && a[1] >= 2 && a[2] >= 2 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無土洋同買訊號" };
   const list = hits.map(([c]) => ({ c, f: fl.get(c, "f_amt") }));
   list.sort((a, b2) => ((b2.f ?? -Infinity) - (a.f ?? -Infinity)));
@@ -1506,11 +1516,11 @@ function fxCardNewHigh(s, ctx) {    // 卡3 突破新高：nh==1，依法人買�
   const entries = Object.entries(b.stocks || {});
   if (!entries.some(([, a]) => Array.isArray(a) && a.length >= 9))
     throw new Error("baseline 缺 nh 欄（Phase A schema 未落地）");
-  const hits = entries.filter(([, a]) => a && a[8] === 1);
+  const hits = entries.filter(([c, a]) => a && a[8] === 1 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無突破20日新高" };
   hits.sort((x, y) => ((y[1][5] ?? -Infinity) - (x[1][5] ?? -Infinity)));
   const rows = hits.slice(0, FX_ROWS_MAX).map(([c, a]) => ({ l: c, m: ctx.names.get(c) || c,
-    r: `強度 ${fxSgn(a[5], "%")}`, c: fxC(a[5]) }));
+    r: fxSgn(a[5], "%"), c: fxC(a[5]) }));
   return { title: "突破新高", sub: `資料日 ${b.date}`, rows,
     note: "依法人買強度降序，歷史分離度 0.92%、非單調",
     foot: "母體歷史 T+3 超額為負（勝大盤僅 41.7%）——本卡僅記錄突破事實，不構成偏多解讀" };
@@ -1520,7 +1530,7 @@ function fxCardNewLow(s, ctx) {     // 卡4 弱勢榜：nl==1，依量能趨勢 
   const entries = Object.entries(b.stocks || {});
   if (!entries.some(([, a]) => Array.isArray(a) && a.length >= 10))
     throw new Error("baseline 缺 a20 欄（Phase A schema 未落地）");
-  const hits = entries.filter(([, a]) => a && a[6] === 1);
+  const hits = entries.filter(([c, a]) => a && a[6] === 1 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無跌破20日新低" };
   const list = hits.map(([c, a]) => ({ c, v: a[9] > 0 ? a[0] / a[9] : null }));
   list.sort((x, y) => ((y.v ?? -Infinity) - (x.v ?? -Infinity)));
@@ -1531,18 +1541,20 @@ function fxCardNewLow(s, ctx) {     // 卡4 弱勢榜：nl==1，依量能趨勢 
 }
 function fxCardExitSell(s, ctx) {   // 卡5 退出＋法人賣：y1==-1 ∩ ints<-5%，不排序（回測：候選欄無效）
   const b = fxNeed(s.baseline, "baseline");
-  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === -1 && a[5] < -5);
+  const hits = Object.entries(b.stocks || {}).filter(([c, a]) =>
+    a && a[3] === -1 && a[5] < -5 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無退出＋法人賣訊號" };
   hits.sort((x, y) => x[0].localeCompare(y[0]));   // 僅為輸出確定性依代號排列，非強弱排序
   const rows = hits.slice(0, FX_ROWS_MAX).map(([c, a]) => ({ l: c, m: ctx.names.get(c) || c,
-    r: `強度 ${fxSgn(a[5], "%")}`, c: fxC(a[5]) }));
+    r: fxSgn(a[5], "%"), c: fxC(a[5]) }));
   return { title: "退出＋法人賣", sub: `資料日 ${b.date}`, rows,
     note: "本卡不排序（候選排序欄回測無效），依代號排列，順序不含強弱意義" };
 }
 function fxCardSurgeWarn(s, ctx) {  // 卡6 追高警示：y1==1，S=當日成交額/5日均額 降序呈現
   const b = fxNeed(s.baseline, "baseline");
   const fl = fxNeed(ctx.flows, "flowsDaily");
-  const hits = Object.entries(b.stocks || {}).filter(([, a]) => a && a[3] === 1);
+  const hits = Object.entries(b.stocks || {}).filter(([c, a]) =>
+    a && a[3] === 1 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無爆量大漲訊號" };
   const list = hits.map(([c, a]) => {
     const amt = fl.get(c, "amt");   // 千元；a5 為元 → S = amt*1000/a5
