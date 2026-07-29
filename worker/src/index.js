@@ -1958,7 +1958,8 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   // LINE 是主要交付通道：只剩 webhook 成功時 KV 仍會寫（一晚一推硬約束），
   // LINE 當晚不補推——但不得靜默，補一發告警讓使用者知道主通道失守（B2 驗收建議）
   if (!sentVia.some((v) => v.startsWith("line")))
-    await alertJob(env, tp, "cards-line-err", `【排程】圖卡 LINE 通道全敗（已由 webhook 送達）：${errs.join("；")}`);
+    await alertJob(env, tp, "cards-line-err",
+      `圖卡 LINE 通道全敗（已由 webhook 送達）：${errs.join("；")}`, fetchFn);
   if (env.FLOW_KV) await env.FLOW_KV.put(key, "pushed", { expirationTtl: ALERTED_TTL });
   const out = { name: "cards", sent: true, via: sentVia, cards: cards.length,
     skippedCards: built.skipped.length };
