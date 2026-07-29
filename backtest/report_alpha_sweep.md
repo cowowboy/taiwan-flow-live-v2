@@ -1,6 +1,6 @@
 # 全站 Alpha 盤點掃描報告（第一階段）
 
-依 `docs/alpha-sweep-preregistration.md` 執行；該文件 commit：`2a3489a3a1dce8be89cfd79bebe6db31d361977a 2026-07-27T16:57:01Z`
+依 `docs/alpha-sweep-preregistration.md` 執行；該文件 commit：`24861a7e935800c9fb751df51ced71d61b76e178 2026-07-29T00:22:03Z`
 
 > 本次共檢定 16 個訊號。若全部為無效訊號，在名目 5% 水準下預期仍有約 0.8 個會偶然「看起來有效」。請據此對 A 層結果打折。
 
@@ -28,7 +28,7 @@ T+3 對 TAIEX 超額（`e3`）為唯一主要指標；T+1（`e1`）只作描述�
 對照組 surge<1.2 或 |ret|<1%       N= 72047  T+1漲 47.2%  T+3漲 49.2%  T+3勝大盤 42.2%  超額T+3 avg -0.16% med -0.85%
 
 ## 已知偏差（1–4＝預註冊 §2.2；5＝實作揭露。必須隨結果一起讀）
-1. **外資口徑少一塊**：快取的 inst 只收 `Investment_Trust` + `Foreign_Investor`，生產的外資＝`Foreign_Investor + Foreign_Dealer_Self`（`taiwan-flows/src/pipeline.py:12`）。AS-01~04 的外資金額因此略小於線上值；未修之前，AS-01~04 的結論只適用於「不含外資自營」的口徑。
+1. **外資口徑（2026-07-29 起已對齊生產）**：fetch.py 現收 `Foreign_Investor + Foreign_Dealer_Self`（＝生產口徑，`taiwan-flows/src/pipeline.py:12`）。第一版報告（commit 04ba1ad）的快取只含 `Foreign_Investor`，本版為口徑覆核重跑（預註冊 §5）；若本快取為舊版抓取，AS-01~04 結論僅適用不含外資自營口徑。
 2. **快取無自營**：所以完全沒有涉及自營的候選。
 3. **`Trading_Volume` 未存**：快取只有 `Trading_money`（`fetch.py:88`）。用金額當成交量的代理會失真（金額＝量×均價），所以量能類指標全部不列入第一階段。
 4. **52 週高低暖身不足**：需 ~250 交易日暖身，快取全長僅 255 日，扣掉後只剩約 1 個月可算。排除。
