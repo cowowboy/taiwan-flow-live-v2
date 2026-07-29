@@ -34,7 +34,7 @@
 
 台股盤中即時資金流向監控站，同時是「股市雷達」四站家族的**資料中樞**
 （`PROJECT_SUMMARY.md:386`）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
-前端是單檔 `index.html`（150KB），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
+前端是單檔 `index.html`（129KB），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
 資金湧入／資金退出＋摘要分析（`index.html:145-151`）。
 **`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
 

@@ -96,7 +96,10 @@ def main():
             if c not in keep:
                 continue
             n = r.get("name")
-            if n not in ("Investment_Trust", "Foreign_Investor"):
+            # 外資＝Foreign_Investor + Foreign_Dealer_Self，對齊生產口徑
+            # （taiwan-flows/src/pipeline.py:12）。2026-07-29 口徑覆核前只收
+            # Foreign_Investor，見 docs/alpha-sweep-preregistration.md §5。
+            if n not in ("Investment_Trust", "Foreign_Investor", "Foreign_Dealer_Self"):
                 continue
             o = inst.setdefault(c, [0, 0])
             net = (r.get("buy") or 0) - (r.get("sell") or 0)

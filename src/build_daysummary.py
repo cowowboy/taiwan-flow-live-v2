@@ -14,6 +14,11 @@
 - 佔比最高：次產業 amt 降序第一；佔比 = (amt/1e8)/market.tse.amt_yi*100。
 - 「升幅最大」：收盤後無盤中近30分基準（f30/flow 只在盤中有），依總結卡註解
   「以全日貢獻點最高口徑呈現」→ pts_top = 次產業 pts 降序第一（須 >0）。
+- 2026-07-28 Phase A（LINE 圖卡 ov-7/ov-14/chain-1，additive、既有欄位不動）：
+  - chain_top5/chain_bot3：產業鏈「產業」層（p[0]）聚合的貢獻點前5/後3；
+    **產業層去重**——一檔在同產業多個次產業只計一次（taiwan-flows 記過的坑，
+    不去重會把半導體 ~-795億 膨脹成 ~-2700億）。
+  - subs_all：全部次產業（n_stk>=3，同前端門檻）的 {n,pts,amt_yi,share_pct,n_stk} 表。
 - 定調句：同卡模板（去掉「今日」前綴以便晨報以「昨日」語境引用）：
   「大盤 ±X.X 點（±X.XX%）；廣度 漲U／跌D；全日成交佔比最高 A（P%），貢獻最強 B（±X.X 點）。」
 - 全日高低：series 的 idx（加權指數）max/min。
@@ -79,6 +84,35 @@ def clean_sub(s: str) -> str:
     return re.sub(r"\s*[（(].*$", "", s or "")
 
 
+def agg_multi(stocks: dict, cl: dict, i_amt: int, i_pts: int, i_chg, level: int) -> list:
+    """classify.json map[code].p 多對多歸戶＋該層去重後的聚合（純函式，離線可測）。
+
+    level=1：次產業層（{p[1]}，同 ovComputeSubAgg／原 build 內嵌迴圈，語意不變）；
+    level=0：產業鏈「產業」層（{p[0]}）——一檔在同產業多個次產業只計一次
+    （產業層去重，taiwan-flows CLAUDE.md 記過的坑）。
+    回傳 n_stk>=3 的聚合列（同前端 filter(s=>s.n>=3)）。"""
+    agg: dict[str, dict] = {}
+    for code, v in stocks.items():
+        info = cl.get(code)
+        if not info or info.get("t") != "twse" or not info.get("p"):
+            continue
+        if not isinstance(v, (list, tuple)) or len(v) <= i_pts:
+            continue
+        amt = v[i_amt] or 0
+        pts = v[i_pts] or 0
+        chg = (v[i_chg] if i_chg is not None and len(v) > i_chg else None) or 0
+        for name in {p[level] for p in info["p"]}:
+            o = agg.setdefault(name, {"n": name, "amt": 0.0, "pts": 0.0, "up": 0, "down": 0, "n_stk": 0})
+            o["amt"] += amt
+            o["pts"] += pts
+            o["n_stk"] += 1
+            if chg > 0:
+                o["up"] += 1
+            elif chg < 0:
+                o["down"] += 1
+    return [s for s in agg.values() if s["n_stk"] >= 3]
+
+
 def build(date: str) -> int:
     live = get_json(f"{WORKER}/live?t={int(time.time()*1000)}")
     ts = (live.get("ts") or "")[:10]
@@ -112,26 +146,9 @@ def build(date: str) -> int:
     stocks_bot3 = [r for r in sorted(rows, key=lambda r: r["pts"])[:5] if r["pts"] < 0]
 
     # ---- 次產業聚合（多對多去重、每個次產業各加一次全額；同 ovComputeSubAgg）----
-    agg: dict[str, dict] = {}
-    for code, v in (live.get("stocks") or {}).items():
-        info = cl.get(code)
-        if not info or info.get("t") != "twse" or not info.get("p"):
-            continue
-        if not isinstance(v, (list, tuple)) or len(v) <= i_pts:
-            continue
-        amt = v[i_amt] or 0
-        pts = v[i_pts] or 0
-        chg = (v[i_chg] if i_chg is not None and len(v) > i_chg else None) or 0
-        for name in {p[1] for p in info["p"]}:
-            o = agg.setdefault(name, {"n": name, "amt": 0.0, "pts": 0.0, "up": 0, "down": 0, "n_stk": 0})
-            o["amt"] += amt
-            o["pts"] += pts
-            o["n_stk"] += 1
-            if chg > 0:
-                o["up"] += 1
-            elif chg < 0:
-                o["down"] += 1
-    subs = [s for s in agg.values() if s["n_stk"] >= 3]
+    subs = agg_multi(live.get("stocks") or {}, cl, i_amt, i_pts, i_chg, level=1)
+    # ---- 產業鏈「產業」層聚合（Phase A：卡 chain-1 用；產業層去重見 agg_multi docstring）----
+    chains = agg_multi(live.get("stocks") or {}, cl, i_amt, i_pts, i_chg, level=0)
 
     mkt = live.get("market") or {}
     mkt_amt_yi = ((mkt.get("tse") or {}).get("amt_yi")) or 0
@@ -147,6 +164,10 @@ def build(date: str) -> int:
 
     subs_top5 = [sub_row(s) for s in sorted(subs, key=lambda s: -s["pts"])[:5] if s["pts"] > 0]
     subs_bot3 = [sub_row(s) for s in sorted(subs, key=lambda s: s["pts"])[:5] if s["pts"] < 0]
+    # ---- Phase A additive 欄位（ov-7/ov-14/chain-1）----
+    chain_top5 = [sub_row(s) for s in sorted(chains, key=lambda s: -s["pts"])[:5] if s["pts"] > 0]
+    chain_bot3 = [sub_row(s) for s in sorted(chains, key=lambda s: s["pts"])[:3] if s["pts"] < 0]
+    subs_all = [sub_row(s) for s in sorted(subs, key=lambda s: -s["pts"])]
     share_top = sub_row(max(subs, key=lambda s: s["amt"])) if subs else None
     pts_top_cand = max(subs, key=lambda s: s["pts"]) if subs else None
     pts_top = sub_row(pts_top_cand) if pts_top_cand and pts_top_cand["pts"] > 0 else None
@@ -209,6 +230,9 @@ def build(date: str) -> int:
         "subs_bot3": subs_bot3,
         "share_top": share_top,
         "pts_top": pts_top,
+        "chain_top5": chain_top5,
+        "chain_bot3": chain_bot3,
+        "subs_all": subs_all,
         "series_n": len(series),
     }
 
