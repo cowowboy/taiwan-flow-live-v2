@@ -55,7 +55,7 @@ jobs:
           report = open('backtest/report_sorting.md', encoding='utf-8').read().split('\n')
 
           # 表格列：| N | 卡名 | … | `report_sorting.md:123` | 或 | `:123` … |
-          rows = re.findall(r'^\|\s*(\d)\s*\|([^|]+)\|.*?`(?:report_sorting\.md)?:(\d+)`',
+          rows = re.findall(r'^\|\s*(\d)\s*\|([^|]+)\|.*?`(?:report_sorting\.md)?:(\d+)`[^|]*\|\s*$',
                             spec, re.M)
           if len(rows) != 6:
               sys.exit(f'FAIL: 規格表格應有 6 張卡的行號引用，實際找到 {len(rows)}')
