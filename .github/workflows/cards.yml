@@ -1,0 +1,66 @@
+name: cards
+# LINE 圖卡 PNG 渲染晚班（spec 3C 呈現層改向）：Worker /cards/data（buildDailyCards 經
+# FX_ACTIVE_CARDS 過濾，卡片邏輯唯一來源）→ Pillow 渲染 → commit data/cards/latest/*.png
+# ＋ manifest.json → Worker pushDailyCards（台北 22:30 起）抓 manifest，date==今日才掛
+# hero 圖；本班失敗／遲到＝當晚自動退純文字 bubble，不擋推播。
+#
+# 時序依據：留下的 11 張卡來源最晚就緒是 aetfDiff（21:45）與 flows（21:4x），22:12 渲染
+# → 22:30 推播剛好；postmkt.json（23:1x 才好）不被任何留下的卡使用，不必等它。
+# 冪等：整目錄每晚重建（腳本先清 *.png 再寫），重跑無害。
+on:
+  schedule:
+    - cron: '12 14 * * 1-5'   # 台北 22:12（UTC+8）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cards
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pillow
+      # 字型不進 git（兩檔 ~33MB）：cache 命中直接用，未命中才下載
+      - name: cache fonts
+        id: fontcache
+        uses: actions/cache@v4
+        with:
+          path: fonts
+          key: noto-sans-tc-otf-v1
+      - name: download Noto Sans TC
+        if: steps.fontcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p fonts
+          base="https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese"
+          curl -fsSL -o fonts/NotoSansTC-Bold.otf    "$base/NotoSansCJKtc-Bold.otf"
+          curl -fsSL -o fonts/NotoSansTC-Regular.otf "$base/NotoSansCJKtc-Regular.otf"
+          # 守門：OTF magic（OTTO）＋尺寸合理，抓到錯誤頁/截斷檔就地失敗，不產豆腐圖
+          for f in fonts/NotoSansTC-Bold.otf fonts/NotoSansTC-Regular.otf; do
+            [ "$(head -c 4 "$f")" = "OTTO" ] || { echo "::error::$f 非 OTF"; exit 1; }
+            [ "$(wc -c < "$f")" -gt 1000000 ] || { echo "::error::$f 檔案過小"; exit 1; }
+          done
+      - name: render cards png
+        run: python src/build_cards_png.py
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/cards/latest/
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "cards png $(date -u +%FT%TZ)"
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push; then pushed=1; break; fi
+            sleep 4
+          done
+          if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
+          # 不 dispatch pages：PNG 由 raw.githubusercontent 供 LINE hero 引用，網站不吃這批檔

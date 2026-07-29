@@ -2,7 +2,7 @@
 // 執行：cd worker && node test/cardsend.mjs
 // 守的規格：docs/line-cards-spec.md 第 5 節（發送層）、9.3（判空/預過濾/退純文字/KV 去重）。
 import { pushDailyCards, fetchCardSources, cardSourceUrls, CARDS_PUSH_AFTER_MIN,
-  alertedKey, runEvening } from "../src/index.js";
+  alertedKey, runEvening, buildCardsData, attachCardImages, FX_ACTIVE_CARDS } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -156,7 +156,7 @@ const FULL = () => ({
   chk("0 卡 → KV 記 skip-empty", kv._m.get(DEDUP_KEY) === "skip-empty");
 }
 
-// ---- ⑥ 正常路徑：13 支 fetch、flex carousel、altText 帶序號、成功寫 KV ----
+// ---- ⑥ 正常路徑：14 支 fetch、flex carousel、altText 帶序號、成功寫 KV ----
 {
   const spy = [];
   const kv = fakeKV();
@@ -167,7 +167,7 @@ const FULL = () => ({
   chk("正常 → 卡數>0（來源缺的卡進 skipped 不擋）", out.cards > 0 && out.skippedCards > 0, JSON.stringify(out));
   const wanted = new Set(Object.values(URLS));
   const got = productUrls(spy);
-  chk("正常 → 13 支來源 JSON 全打過", wanted.size === 13 && [...wanted].every((u) => got.has(u)),
+  chk("正常 → 14 支來源 JSON 全打過（13 支資料＋manifest）", wanted.size === 14 && [...wanted].every((u) => got.has(u)),
     `wanted=${wanted.size} got=${got.size}`);
   const lc = lineCalls(spy);
   chk("正常 → LINE 恰一次 push", lc.length === 1 && lc[0].kind === "line-flex");
@@ -260,7 +260,7 @@ const FULL = () => ({
   const hits = [];
   const src2 = await fetchCardSources(ENV_BASE, TP, () => { throw new Error("不該用到 fetchFn"); },
     { getProduct: async (u) => { hits.push(u); return u === URLS.baseline ? { date: TODAY } : null; } });
-  chk("getProduct 注入 → 13 支全走快取層", hits.length === 13 && src2.baseline.date === TODAY);
+  chk("getProduct 注入 → 14 支全走快取層", hits.length === 14 && src2.baseline.date === TODAY);
 }
 
 // ---- ⑪ 接線：runEvening 附加步驟（既有鏈不受影響、錯誤被隔離）----
@@ -300,6 +300,88 @@ const FULL = () => ({
   const out = await runEvening({ ...ENV_LINE, GH_DISPATCH_TOKEN: "T", FLOW_KV: fakeKV() },
     { date: "2026-07-26", hour: 22, minute: 30, dow: 0 }, mkFetch(FULL(), spy));
   chk("evening 非交易日 → 整段 skip 零網路（含 cards）", out.skipped === "non-trading-day" && spy.length === 0);
+}
+
+// ---- ⑫ PNG hero（spec 3C）：manifest 當日→掛圖、非當日／缺檔→一律文字版 ----
+const IMG = (id, d = TODAY) =>
+  `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
+const MANIFEST = (date = TODAY) => ({ date, generated_at: `${date}T22:14:00+08:00`,
+  images: { "sig-dual-buy": IMG("sig-dual-buy", date), "v2-ov-1": IMG("v2-ov-1", date) },
+  ratios: { "sig-dual-buy": "1040:1216" } });
+const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.contents.contents);
+{
+  // 當日 manifest：有圖的卡出 hero、body 無 rows；沒圖的卡維持原文字版型
+  const spy = [];
+  const byUrl = { ...FULL(), [URLS.manifest]: MANIFEST() };
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, spy));
+  chk("manifest 當日 → sent＋imgs=2", out.sent === true && out.imgs === 2, JSON.stringify(out));
+  const bubbles = flexBubbles(spy);
+  const heroed = bubbles.filter((b) => b.hero);
+  chk("恰 2 個 bubble 有 hero 圖", heroed.length === 2, `heroed=${heroed.length}`);
+  chk("hero 為 image/full/cover＋manifest URL（含破快取 query）",
+    heroed.every((b) => b.hero.type === "image" && b.hero.size === "full"
+      && b.hero.aspectMode === "cover" && b.hero.url.includes("/data/cards/latest/")
+      && b.hero.url.includes(`?d=${TODAY}`)), JSON.stringify(heroed[0] && heroed[0].hero));
+  const dual = heroed.find((b) => b.hero.url.includes("sig-dual-buy"));
+  chk("有 ratios 的卡用實際圖比例", dual && dual.hero.aspectRatio === "1040:1216",
+    dual && dual.hero.aspectRatio);
+  const ov1 = heroed.find((b) => b.hero.url.includes("v2-ov-1"));
+  chk("無 ratios 的卡退預設 3:4", ov1 && ov1.hero.aspectRatio === "3:4", ov1 && ov1.hero.aspectRatio);
+  chk("hero bubble body 精簡（無 fxRow 的 l 欄 flex:2 結構、仍有標題）",
+    heroed.every((b) => !JSON.stringify(b.body).includes('"layout":"horizontal"')
+      && JSON.stringify(b.body).includes("資料日")), JSON.stringify(heroed[0] && heroed[0].body).slice(0, 120));
+  const plain = bubbles.filter((b) => !b.hero && !JSON.stringify(b).includes("關於這份清單"));
+  chk("無圖的卡維持文字版型（有資料列）", plain.length > 0
+    && plain.some((b) => JSON.stringify(b).includes('"layout":"horizontal"')));
+}
+{
+  // manifest 非當日（昨日圖）→ 一張都不掛
+  const spy = [];
+  const byUrl = { ...FULL(), [URLS.manifest]: MANIFEST("2026-07-18") };
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, spy));
+  chk("manifest 非當日 → imgs=0、照推文字版", out.sent === true && out.imgs === 0, JSON.stringify(out));
+  chk("manifest 非當日 → payload 零 hero", flexBubbles(spy).every((b) => !b.hero));
+}
+{
+  // manifest 缺檔（404）→ 同樣文字版；退純文字時 hero 卡內容不變薄（rows 仍在 fallback）
+  const spy = [];
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL(), spy));
+  chk("manifest 缺 → imgs=0、照推", out.sent === true && out.imgs === 0, JSON.stringify(out));
+  chk("manifest 缺 → payload 零 hero", flexBubbles(spy).every((b) => !b.hero));
+  const spy2 = [];
+  const byUrl2 = { ...FULL(), [URLS.manifest]: MANIFEST() };
+  await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl2, spy2, { lineFailFlex: true }));
+  const txt = lineCalls(spy2)[1].body.messages[0].text;
+  chk("flex 失敗退純文字 → hero 卡的資料列仍在（卡物件保留 rows）",
+    txt.includes("土洋同買") && txt.includes("3231"), txt.slice(0, 200));
+}
+{
+  // attachCardImages 邊界：非 https URL 不掛、壞 ratio 不掛 imgRatio、images 非物件不掛
+  const cards = [{ id: "a" }, { id: "b" }];
+  chk("http URL 被拒", attachCardImages(cards, { date: TODAY, images: { a: "http://x/a.png" } }, TODAY) === 0
+    && cards[0].img === undefined);
+  const c2 = [{ id: "a" }];
+  attachCardImages(c2, { date: TODAY, images: { a: IMG("a") }, ratios: { a: "壞格式" } }, TODAY);
+  chk("壞 ratio → 有 img 無 imgRatio（bubble 端退 3:4）", c2[0].img && c2[0].imgRatio === undefined);
+  chk("images 非物件 → 0", attachCardImages([{ id: "a" }], { date: TODAY, images: 42 }, TODAY) === 0);
+}
+
+// ---- ⑬ /cards/data 端點主體 buildCardsData（mock fetchFn，零真實網路）----
+{
+  const spy = [];
+  const out = await buildCardsData({ ...ENV_BASE, FINMIND_TOKEN: "tk" }, TP, mkFetch(FULL(), spy));
+  chk("回 {date, cards}", out.date === TODAY && Array.isArray(out.cards), JSON.stringify(Object.keys(out)));
+  chk("卡片全在 FX_ACTIVE_CARDS 白名單內", out.cards.length > 0
+    && out.cards.every((c) => FX_ACTIVE_CARDS.has(c.id)), out.cards.map((c) => c.id).join(","));
+  chk("含活躍卡 v2-ov-1／sig-dual-buy", ["v2-ov-1", "sig-dual-buy"].every((id) =>
+    out.cards.some((c) => c.id === id)));
+  chk("不含被裁剪卡（v2-ov-5／sig-new-high 有源也不出）",
+    !out.cards.some((c) => c.id === "v2-ov-5" || c.id === "sig-new-high"));
+  chk("卡片帶渲染所需欄位（title＋rows|paras）", out.cards.every((c) =>
+    c.title && ((c.rows || []).length || (c.paras || []).length)));
+  chk("有 FINMIND_TOKEN 也不打 FinMind（noVix）", !spy.some((c) => c.url.includes("finmind")));
+  const wanted = new Set(Object.values(cardSourceUrls(ENV_BASE, TODAY)));
+  chk("走同一套 14 支來源", [...productUrls(spy)].every((u) => wanted.has(u)));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

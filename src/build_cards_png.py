@@ -1,0 +1,439 @@
+# src/build_cards_png.py — LINE 圖卡 PNG 渲染（spec 3C 呈現層改向，2026-07-30）
+#
+# 架構定位：卡片邏輯唯一來源＝Worker /cards/data（buildDailyCards 經 FX_ACTIVE_CARDS
+# 過濾後的 JSON），本腳本**只渲染不算數**。Actions 晚班（cards.yml，台北 22:12）跑本腳本
+# → commit data/cards/latest/*.png ＋ manifest.json → pushDailyCards（台北 22:30）抓
+# manifest（date==今日才用），有圖的卡改 Flex hero 圖 bubble；缺圖退現行文字 bubble。
+#
+# 版型（使用者提供參考風格：深藍底＋金色漸層條＋獎牌排行）：
+#   排行卡：深藍漸層底、白色粗體標題＋右上資料日、每列＝名次（前三名金/銀/銅圓章）＋
+#           代號（小字藍）＋名稱（白粗）＋金色漸層橫條（比例化於該卡最大絕對值）＋
+#           右側數值（正紅負綠、千分位）；底部灰字 note＋免責句。
+#   看板卡（DASH_IDS：ov-1 總結／hdr-1 三大法人／hdr-2 台指期）：同色系 2 欄大數字格。
+#   paras 卡（如 pm-aetf-5）：置中大字逐段。
+#   寬固定 1040px、高依內容動態（排行每列 96px）；輸出 PNG 需 <1MB（有斷言）。
+#
+# 字型：Noto Sans TC。找 <repo>/fonts/NotoSansTC-Bold.otf 與 -Regular.otf（不進 git，
+# cards.yml 下載＋actions/cache）；缺檔印明確錯誤退出非 0。--font-fallback 僅供無字型
+# 環境驗版型（中文會是豆腐字，正式管線不得使用）。
+#
+# 用法：
+#   python src/build_cards_png.py                        # 打 WORKER_BASE /cards/data
+#   python src/build_cards_png.py --offline fixture.json # 本地 JSON（測試用，免網路）
+#   WORKER_BASE=https://... 覆蓋 Worker base（預設 taiwan-flow-v2.shihpc.workers.dev）
+#   --out DIR 覆蓋輸出目錄（預設 data/cards/latest）
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
+RAW_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest"
+OUT_DIR = ROOT / "data" / "cards" / "latest"
+FONT_DIR = ROOT / "fonts"
+
+W = 1040                      # 固定寬
+ROW_H = 96                    # 排行卡每列高
+MAX_PNG_BYTES = 1_000_000     # LINE hero 圖保守上限（<1MB）
+DISCLAIMER = "數據僅供參考，不代表投資建議"
+
+# 看板卡（非排行型）：大數字格版型
+DASH_IDS = {"v2-ov-1", "flows-hdr-1", "flows-hdr-2"}
+
+# 色票（深藍＋金；正紅負綠沿用全站慣例、亮度調高配深底）
+C_BG_TOP = (26, 58, 107)      # #1A3A6B
+C_BG_BOT = (15, 35, 71)       # #0F2347
+C_TITLE = (255, 255, 255)
+C_DATE = (143, 167, 206)      # 右上資料日
+C_DIVIDER = (46, 74, 122)
+C_CODE = (127, 168, 224)      # 代號小字藍
+C_NAME = (255, 255, 255)
+C_BAR_L = (247, 217, 126)     # 金色漸層條 左
+C_BAR_R = (201, 147, 43)     # 金色漸層條 右
+C_BAR_UP_L = (255, 150, 138)  # 買超條 左（紅）
+C_BAR_UP_R = (198, 74, 62)    # 買超條 右
+C_BAR_DN_L = (114, 226, 168)  # 賣超條 左（綠）
+C_BAR_DN_R = (36, 156, 100)   # 賣超條 右
+C_UP = (255, 123, 110)        # 正＝紅（台股慣例）
+C_DOWN = (61, 214, 140)       # 負＝綠
+C_NEUTRAL = (195, 204, 218)
+C_NOTE = (133, 147, 168)
+C_DISC = (110, 124, 147)
+C_CELL = (30, 58, 105)        # 看板格底
+C_LABEL = (143, 167, 206)
+MEDALS = [(240, 194, 75), (200, 207, 218), (201, 138, 90)]   # 金/銀/銅
+C_MEDAL_TXT = (20, 34, 62)
+C_RANK = (143, 167, 206)      # 第 4 名起的名次數字
+
+_NUM_RE = re.compile(r"[-+−]?\d[\d,]*\.?\d*")
+
+
+def parse_value(r: str) -> float | None:
+    """從資料列右欄字串抽第一個數值（帶正負），供橫條比例化。抽不到回 None（條長 0）。"""
+    m = _NUM_RE.search(str(r or ""))
+    if not m:
+        return None
+    t = m.group(0).replace(",", "").replace("−", "-")   # U+2212 負號正規化
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def bar_width(value: float | None, max_abs: float, max_w: int) -> int:
+    """橫條長度＝max_w × |value|/max_abs；非零值下限 4px（可見）、上限 max_w。"""
+    if value is None or max_abs <= 0:
+        return 0
+    w = abs(value) / max_abs * max_w
+    if w <= 0:
+        return 0
+    return max(4, min(int(round(w)), max_w))
+
+
+def fmt_thousands(r: str) -> str:
+    """右欄數值加千分位（僅整數部位 ≥4 位數時；小數位保留原樣）。"""
+    def repl(m: re.Match) -> str:
+        t = m.group(0)
+        if "," in t:
+            return t
+        sign = ""
+        if t[0] in "+-−":
+            sign, t = t[0], t[1:]
+        intpart, dot, frac = t.partition(".")
+        if len(intpart) < 4:
+            return m.group(0)
+        return f"{sign}{int(intpart):,}{dot}{frac}"
+    return _NUM_RE.sub(repl, str(r or ""))
+
+
+# ---------------- 字型 ----------------
+
+def load_fonts(font_dir: Path, fallback: bool):
+    from PIL import ImageFont
+    bold_p = font_dir / "NotoSansTC-Bold.otf"
+    reg_p = font_dir / "NotoSansTC-Regular.otf"
+    if bold_p.exists() and reg_p.exists():
+        mk_b = lambda s: ImageFont.truetype(str(bold_p), s)   # noqa: E731
+        mk_r = lambda s: ImageFont.truetype(str(reg_p), s)    # noqa: E731
+        return mk_b, mk_r
+    if not fallback:
+        print(
+            "ERROR: 找不到字型檔：\n"
+            f"  {bold_p}\n  {reg_p}\n"
+            "請下載 Noto Sans TC（cards.yml 會自動下載；本機可從\n"
+            "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/\n"
+            "取 NotoSansCJKtc-Bold.otf / NotoSansCJKtc-Regular.otf 存為上述檔名），\n"
+            "或以 --font-fallback 用預設字型驗版型（中文會變豆腐字，正式管線不得使用）。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print("WARN: 使用 Pillow 預設字型（--font-fallback）——中文將顯示為豆腐字", file=sys.stderr)
+    mk = lambda s: ImageFont.load_default(size=s)   # noqa: E731
+    return mk, mk
+
+
+# ---------------- 繪圖基元 ----------------
+
+def gradient_bg(h: int):
+    from PIL import Image
+    col = Image.new("RGB", (1, h))
+    px = col.load()
+    for y in range(h):
+        t = y / max(1, h - 1)
+        px[0, y] = tuple(int(a + (b - a) * t) for a, b in zip(C_BG_TOP, C_BG_BOT))
+    return col.resize((W, h))
+
+
+def bar_palette(c: str):
+    """條色依方向（2026-07-30 使用者定案）：買賣混排時金色單一色會讓
+    「賣超最長條卻排在後段」視覺打架，改用漲紅跌綠、中性維持金色。"""
+    if c == "up":
+        return C_BAR_UP_L, C_BAR_UP_R
+    if c == "down":
+        return C_BAR_DN_L, C_BAR_DN_R
+    return C_BAR_L, C_BAR_R
+
+
+def gold_bar(draw, x: int, y: int, w: int, h: int, c: str = "neutral"):
+    """左→右漸層圓角橫條（逐欄畫線＋圓角遮尾）；配色依 row.c 方向。"""
+    if w <= 0:
+        return
+    cl, cr = bar_palette(c)
+    r = h // 2
+    for i in range(w):
+        t = i / max(1, w - 1)
+        c_ = tuple(int(a + (b - a) * t) for a, b in zip(cl, cr))
+        # 圓角：頭尾 r 範圍內縮短豎線
+        dy = 0
+        if i < r:
+            dy = r - int((r * r - (r - i) ** 2) ** 0.5)
+        elif i >= w - r:
+            j = i - (w - r - 1)
+            dy = r - int(max(0.0, r * r - j * j) ** 0.5)
+        draw.line([(x + i, y + dy), (x + i, y + h - dy)], fill=c_)
+
+
+def text_w(draw, s: str, font) -> int:
+    return int(draw.textlength(str(s), font=font))
+
+
+def fit_font(draw, s: str, mk, size: int, max_w: int, min_size: int = 18):
+    """字太長自動縮小到塞得下（看板大數字用）。"""
+    while size > min_size and text_w(draw, s, mk(size)) > max_w:
+        size -= 2
+    return mk(size)
+
+
+def wrap_text(draw, s: str, font, max_w: int) -> list[str]:
+    """逐字換行（中文為主，無詞界）。"""
+    lines, cur = [], ""
+    for ch in str(s):
+        if ch == "\n":
+            lines.append(cur)
+            cur = ""
+            continue
+        if text_w(draw, cur + ch, font) > max_w and cur:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
+def value_color(c: str):
+    return {"up": C_UP, "down": C_DOWN}.get(c, C_NEUTRAL)
+
+
+# ---------------- 三種版型 ----------------
+PAD = 48
+HEADER_H = 148
+
+
+def draw_header(draw, card, F_B, F_R):
+    draw.text((PAD, 44), str(card.get("title", "")), font=F_B(48), fill=C_TITLE)
+    sub = str(card.get("sub", "") or "")
+    if sub:
+        f = F_R(26)
+        draw.text((W - PAD - text_w(draw, sub, f), 62), sub, font=f, fill=C_DATE)
+    draw.line([(PAD, HEADER_H - 20), (W - PAD, HEADER_H - 20)], fill=C_DIVIDER, width=2)
+
+
+def footer_lines(draw, card, F_R):
+    f = F_R(24)
+    lines = []
+    for t in [card.get("note"), card.get("foot")]:
+        if t:
+            lines += wrap_text(draw, str(t), f, W - 2 * PAD)
+    return lines
+
+
+def draw_footer(draw, y: int, lines, F_R) -> int:
+    f = F_R(24)
+    draw.line([(PAD, y), (W - PAD, y)], fill=C_DIVIDER, width=2)
+    y += 18
+    for ln in lines:
+        draw.text((PAD, y), ln, font=f, fill=C_NOTE)
+        y += 34
+    draw.text((PAD, y + 4), f"※ {DISCLAIMER}", font=f, fill=C_DISC)
+    return y + 34 + 18
+
+
+def render_ranking(card, F_B, F_R):
+    """排行卡：名次圓章＋代號＋名稱＋金色比例橫條＋右側數值。"""
+    from PIL import Image, ImageDraw
+    rows = card.get("rows") or []
+    probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
+    flines = footer_lines(probe, card, F_R)
+    h = HEADER_H + len(rows) * ROW_H + 24 + (18 + len(flines) * 34 + 34 + 18)
+    img = gradient_bg(h)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, card, F_B, F_R)
+
+    vals = [parse_value(r.get("r")) for r in rows]
+    max_abs = max((abs(v) for v in vals if v is not None), default=0.0)
+    X_BADGE, X_TEXT = PAD + 26, PAD + 76
+    X_BAR, BAR_MAX_W = 420, 380
+    X_VAL = W - PAD
+    y = HEADER_H + 4
+    for i, row in enumerate(rows):
+        cy = y + ROW_H // 2
+        # 名次：前三名金/銀/銅圓章、其後數字
+        if i < 3:
+            r_ = 26
+            draw.ellipse([X_BADGE - r_, cy - r_, X_BADGE + r_, cy + r_], fill=MEDALS[i])
+            f = F_B(30)
+            s = str(i + 1)
+            draw.text((X_BADGE - text_w(draw, s, f) / 2, cy - 21), s, font=f, fill=C_MEDAL_TXT)
+        else:
+            f = F_B(30)
+            s = str(i + 1)
+            draw.text((X_BADGE - text_w(draw, s, f) / 2, cy - 21), s, font=f, fill=C_RANK)
+        # 代號（小字藍）＋名稱（白粗）；無代號時名稱置中列高
+        code, name = row.get("l"), str(row.get("m", ""))
+        name_max_w = X_BAR - X_TEXT - 16
+        if code is not None:
+            draw.text((X_TEXT, cy - 34), str(code), font=F_R(22), fill=C_CODE)
+            nf = fit_font(draw, name, F_B, 32, name_max_w)
+            draw.text((X_TEXT, cy - 8), name, font=nf, fill=C_NAME)
+        else:
+            nf = fit_font(draw, name, F_B, 32, name_max_w)
+            draw.text((X_TEXT, cy - 20), name, font=nf, fill=C_NAME)
+        # 金色漸層橫條：長度比例化於該卡最大絕對值
+        gold_bar(draw, X_BAR, cy - 9, bar_width(vals[i], max_abs, BAR_MAX_W), 18,
+                 row.get("c") or "neutral")
+        # 右側數值：正紅負綠、千分位
+        vs = fmt_thousands(row.get("r", ""))
+        vf = fit_font(draw, vs, F_B, 32, 190)
+        r2s = row.get("r2")
+        draw.text((X_VAL - text_w(draw, vs, vf), cy - (30 if r2s else 20)), vs,
+                  font=vf, fill=value_color(row.get("c")))
+        if r2s:   # 張數次要值：數值下方小字灰（金額為主、張數佐證量體）
+            f2 = F_R(22)
+            draw.text((X_VAL - text_w(draw, str(r2s), f2), cy + 8), str(r2s), font=f2, fill=C_NOTE)
+        if i < len(rows) - 1:
+            draw.line([(PAD, y + ROW_H), (W - PAD, y + ROW_H)], fill=C_DIVIDER, width=1)
+        y += ROW_H
+    draw_footer(draw, y + 20, flines, F_R)
+    return img
+
+
+def render_dashboard(card, F_B, F_R):
+    """看板卡（ov-1／hdr-1／hdr-2）：2 欄大數字格。"""
+    from PIL import Image, ImageDraw
+    rows = card.get("rows") or []
+    probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
+    flines = footer_lines(probe, card, F_R)
+    CELL_H, GAP = 190, 20
+    ncols = 1 if len(rows) == 1 else 2
+    nrows = (len(rows) + ncols - 1) // ncols
+    h = HEADER_H + nrows * (CELL_H + GAP) + 16 + (18 + len(flines) * 34 + 34 + 18)
+    img = gradient_bg(h)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, card, F_B, F_R)
+    cell_w = (W - 2 * PAD - (ncols - 1) * GAP) // ncols
+    for i, row in enumerate(rows):
+        cx = PAD + (i % ncols) * (cell_w + GAP)
+        cyt = HEADER_H + 8 + (i // ncols) * (CELL_H + GAP)
+        draw.rounded_rectangle([cx, cyt, cx + cell_w, cyt + CELL_H], radius=18,
+                               fill=C_CELL, outline=C_DIVIDER, width=2)
+        label = str(row.get("m", ""))
+        lf = fit_font(draw, label, F_R, 28, cell_w - 48)
+        draw.text((cx + 28, cyt + 26), label, font=lf, fill=C_LABEL)
+        vs = fmt_thousands(row.get("r", ""))
+        vf = fit_font(draw, vs, F_B, 52, cell_w - 48)
+        draw.text((cx + 28, cyt + CELL_H - 92), vs, font=vf, fill=value_color(row.get("c")))
+    draw_footer(draw, HEADER_H + 8 + nrows * (CELL_H + GAP) + 8, flines, F_R)
+    return img
+
+
+def render_paras(card, F_B, F_R):
+    """paras 卡（如 pm-aetf-5 進出個股）：置中大字逐段。"""
+    from PIL import Image, ImageDraw
+    paras = [str(p) for p in (card.get("paras") or [])]
+    probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
+    f = F_B(34)
+    blocks = [wrap_text(probe, p, f, W - 2 * PAD) for p in paras]
+    nlines = sum(len(b) for b in blocks)
+    flines = footer_lines(probe, card, F_R)
+    h = HEADER_H + 24 + nlines * 52 + len(blocks) * 20 + 24 + (18 + len(flines) * 34 + 34 + 18)
+    img = gradient_bg(h)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, card, F_B, F_R)
+    y = HEADER_H + 24
+    for b in blocks:
+        for ln in b:
+            draw.text(((W - text_w(draw, ln, f)) / 2, y), ln, font=f, fill=C_NAME)
+            y += 52
+        y += 20
+    draw_footer(draw, y + 4, flines, F_R)
+    return img
+
+
+def render_card(card, F_B, F_R):
+    rows, paras = card.get("rows") or [], card.get("paras") or []
+    if rows and card.get("id") in DASH_IDS:
+        return render_dashboard(card, F_B, F_R)
+    if rows:
+        return render_ranking(card, F_B, F_R)
+    if paras:
+        return render_paras(card, F_B, F_R)
+    return None
+
+
+# ---------------- 主流程 ----------------
+
+def fetch_cards(worker_base: str) -> dict:
+    url = f"{worker_base.rstrip('/')}/cards/data"
+    with urllib.request.urlopen(url, timeout=60) as r:   # noqa: S310（固定 https base）
+        return json.loads(r.read().decode("utf-8"))
+
+
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p in out_dir.glob("*.png"):   # 清掉上一日殘圖（manifest 是唯一權威，殘檔只會誤導）
+        p.unlink()
+    date = str(data.get("date", ""))
+    images, ratios = {}, {}
+    for card in data.get("cards") or []:
+        cid = str(card.get("id", ""))
+        if not _ID_RE.match(cid):
+            print(f"WARN: 卡 id 不合法（跳過）：{cid!r}", file=sys.stderr)
+            continue
+        img = render_card(card, F_B, F_R)
+        if img is None:
+            print(f"WARN: 卡 {cid} 無 rows/paras 可渲染（跳過）", file=sys.stderr)
+            continue
+        path = out_dir / f"{cid}.png"
+        img.save(path, format="PNG", optimize=True)
+        size = path.stat().st_size
+        if size >= MAX_PNG_BYTES:
+            raise SystemExit(f"ERROR: {path.name} {size}B ≥ 1MB 上限（LINE hero 圖守門）")
+        # URL 帶日期 query 破 LINE 端快取（同一路徑隔日換圖，LINE CDN 會沿用舊圖）
+        images[cid] = f"{RAW_BASE}/{cid}.png?d={date}"
+        ratios[cid] = f"{img.width}:{img.height}"
+        print(f"  {cid}.png  {img.width}x{img.height}  {size}B")
+    tz8 = timezone(timedelta(hours=8))
+    manifest = {"date": date,
+                "generated_at": datetime.now(tz8).isoformat(timespec="seconds"),
+                "images": images, "ratios": ratios}
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return manifest
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="LINE 圖卡 PNG 渲染（/cards/data → data/cards/latest）")
+    ap.add_argument("--offline", metavar="FIXTURE", help="本地 JSON 取代 /cards/data（測試用）")
+    ap.add_argument("--out", default=str(OUT_DIR), help="輸出目錄（預設 data/cards/latest）")
+    ap.add_argument("--font-dir", default=str(FONT_DIR), help="字型目錄（預設 <repo>/fonts）")
+    ap.add_argument("--font-fallback", action="store_true",
+                    help="缺字型時用預設字型驗版型（中文豆腐字；正式管線不得使用）")
+    args = ap.parse_args(argv)
+
+    F_B, F_R = load_fonts(Path(args.font_dir), args.font_fallback)
+    if args.offline:
+        data = json.loads(Path(args.offline).read_text(encoding="utf-8"))
+    else:
+        base = os.environ.get("WORKER_BASE", DEFAULT_WORKER)
+        data = fetch_cards(base)
+    if not isinstance(data, dict) or "cards" not in data:
+        raise SystemExit(f"ERROR: /cards/data 回應非預期：{str(data)[:200]}")
+    manifest = build_all(data, Path(args.out), F_B, F_R)
+    print(f"完成：{len(manifest['images'])} 張 → {args.out}（date={manifest['date']}）")
+
+
+if __name__ == "__main__":
+    main()

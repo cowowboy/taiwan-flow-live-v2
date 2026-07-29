@@ -43,6 +43,34 @@ const mkCard = (i) => ({
   chk("口徑註記在卡底", js.includes("依範例金額降序") && js.includes("非單調"));
 }
 
+// ---- cardBubble PNG hero 版（spec 3C：img 卡出 hero、body 精簡；缺圖走原版型）----
+{
+  const url = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/t-1.png?d=2026-07-28";
+  const b = cardBubble({ ...mkCard(1), img: url, imgRatio: "1040:1216" });
+  chk("img 卡有 hero image", b.hero && b.hero.type === "image" && b.hero.url === url);
+  chk("hero size=full／aspectMode=cover", b.hero.size === "full" && b.hero.aspectMode === "cover");
+  chk("aspectRatio 用實際圖比例", b.hero.aspectRatio === "1040:1216");
+  const js = JSON.stringify(b.body);
+  chk("body 精簡：標題＋資料日在、rows 不重複出", js.includes("測試卡1") && js.includes("07-28")
+    && !js.includes("範例甲"), js.slice(0, 120));
+  chk("note/foot 仍在卡底（口徑註記不因有圖而消失）",
+    js.includes("依範例金額降序") && js.includes("非單調"));
+  const b2 = cardBubble({ ...mkCard(2), img: url });
+  chk("無 imgRatio → 預設 3:4", b2.hero.aspectRatio === "3:4");
+  const b3 = cardBubble({ ...mkCard(3), img: url, imgRatio: "not-a-ratio" });
+  chk("壞 imgRatio → 退預設 3:4", b3.hero.aspectRatio === "3:4");
+  const b4 = cardBubble({ ...mkCard(4), img: "http://insecure.example/x.png" });
+  chk("非 https img → 忽略、走原文字版型", !b4.hero && JSON.stringify(b4).includes("範例甲"));
+  // hero 卡照樣過 30KB 守門與誠實原則
+  let threw = null;
+  try { cardBubble({ id: "hb", title: "大", img: url, note: "x".repeat(31000) }); }
+  catch (e) { threw = e.message; }
+  chk("hero 卡 >30KB 同樣拋錯", threw && threw.includes("30KB"), threw);
+  threw = false;
+  try { cardBubble({ id: "hf", title: "本週最強", img: url }); } catch { threw = true; }
+  chk("hero 卡禁用字同樣擋", threw === true);
+}
+
 // ---- wrap:true 全樹斷言（規格：所有 text 元件必須 wrap）----
 {
   const walk = (n, out = []) => {

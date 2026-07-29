@@ -1316,21 +1316,39 @@ export function fxRow(r) {
   const cols = [];
   if (r.l != null) cols.push(fxText(r.l, { flex: 2, size: "xxs", color: FX_COLORS.muted }));
   cols.push(fxText(r.m, { flex: 5, size: "sm" }));
-  cols.push(fxText(r.r, { flex: 3, size: "sm", align: "end", weight: "bold",
-    color: FX_COLORS[r.c] || FX_COLORS.neutral }));
+  // r2＝張數次要值：與金額同格右對齊、小字灰（金額仍是主要值，張數是佐證量體）
+  if (r.r2 != null) {
+    cols.push({ type: "box", layout: "vertical", flex: 4, contents: [
+      fxText(r.r, { size: "sm", align: "end", weight: "bold",
+        color: FX_COLORS[r.c] || FX_COLORS.neutral }),
+      fxText(r.r2, { size: "xxs", align: "end", color: FX_COLORS.muted }),
+    ] });
+  } else {
+    cols.push(fxText(r.r, { flex: 3, size: "sm", align: "end", weight: "bold",
+      color: FX_COLORS[r.c] || FX_COLORS.neutral }));
+  }
   return { type: "box", layout: "horizontal", spacing: "sm", contents: cols };
 }
 export function cardBubble(card) {
   assertCardAllowed(card);
+  // PNG hero 版（spec 3C 呈現層改向）：card.img（HTTPS，pushDailyCards 由 manifest 掛上）
+  // → hero 圖＋body 精簡（title＋資料日＋note/foot）——rows/paras 的數字都在圖裡，不重複。
+  // 卡物件本身仍保留 rows/paras：cardsFallbackText 純文字退路照用，內容不因有圖而變薄。
+  const hasImg = typeof card.img === "string" && card.img.startsWith("https://");
   const body = [fxText(card.title, { weight: "bold", size: "md" })];
   if (card.sub) body.push(fxText(card.sub, { size: "xxs", color: FX_COLORS.muted }));
-  for (const p of card.paras || []) body.push(fxText(p, { size: "sm", margin: "md" }));
-  if ((card.rows || []).length) body.push({ type: "box", layout: "vertical", spacing: "xs",
-    margin: "md", contents: card.rows.map(fxRow) });
+  if (!hasImg) {
+    for (const p of card.paras || []) body.push(fxText(p, { size: "sm", margin: "md" }));
+    if ((card.rows || []).length) body.push({ type: "box", layout: "vertical", spacing: "xs",
+      margin: "md", contents: card.rows.map(fxRow) });
+  }
   const foot = [card.note, card.foot].filter(Boolean);
   if (foot.length) body.push({ type: "separator", margin: "md" },
     fxText(foot.join("\n"), { size: "xxs", color: FX_COLORS.muted, margin: "sm" }));
   const b = { type: "bubble", size: "kilo",
+    ...(hasImg ? { hero: { type: "image", url: card.img, size: "full",
+      aspectRatio: /^\d+:\d+$/.test(card.imgRatio || "") ? card.imgRatio : "3:4",
+      aspectMode: "cover" } } : {}),
     body: { type: "box", layout: "vertical", contents: body } };
   const bytes = utf8len(JSON.stringify(b));
   if (bytes >= 30000) throw new Error(`卡 ${card.id} bubble ${bytes}B（UTF-8）達 30KB 上限`);
@@ -1366,7 +1384,7 @@ export function cardsFallbackText(cards, dateStr) {
     L.push(`■ ${c.title}${c.sub ? `（${c.sub}）` : ""}`);
     for (const p of c.paras || []) L.push(`  ${p}`);
     for (const r of (c.rows || []).slice(0, 5))
-      L.push(`  ${r.l != null ? r.l + " " : ""}${r.m}  ${r.r}`);
+      L.push(`  ${r.l != null ? r.l + " " : ""}${r.m}  ${r.r}${r.r2 ? ` / ${r.r2}` : ""}`);
   }
   L.push(`※ ${FX_DISCLAIMER}`);
   return L.join("\n");
@@ -1424,6 +1442,8 @@ const FX_ROWS_MAX = 8;
 const fxR1 = (v) => { const s = (Math.round(v * 10) / 10).toFixed(1); return s === "-0.0" ? "0.0" : s; };
 const fxSgn = (v, unit = "") => `${v > 0 ? "+" : ""}${fxR1(v)}${unit}`;
 const fxC = (v) => (v > 0 ? "up" : v < 0 ? "down" : "neutral");
+// 張數次要值（row.r2，個股金額卡附註）：帶正負號＋千分位（en-US 固定分組，確定性輸出）
+const fxLots = (v) => `${v > 0 ? "+" : ""}${Math.round(v).toLocaleString("en-US")}張`;
 const fxYiK = (k) => k / 1e5;   // 千元 → 億元
 const fxYi = (v) => v / 1e8;    // 元 → 億元
 const fxNeed = (v, what) => { if (v == null) throw new Error(`${what} 缺`); return v; };
@@ -1504,10 +1524,11 @@ function fxCardDualBuy(s, ctx) {    // 卡2 土洋同買：y1==1 ∩ it≥2 ∩ 
   const hits = Object.entries(b.stocks || {}).filter(([c, a]) =>
     a && a[3] === 1 && a[1] >= 2 && a[2] >= 2 && fxLiqOk(ctx, c, a));
   if (!hits.length) return { skip: "今日無土洋同買訊號" };
-  const list = hits.map(([c]) => ({ c, f: fl.get(c, "f_amt") }));
+  const list = hits.map(([c]) => ({ c, f: fl.get(c, "f_amt"), n: fl.get(c, "f_net") }));
   list.sort((a, b2) => ((b2.f ?? -Infinity) - (a.f ?? -Infinity)));
   const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: ctx.names.get(o.c) || o.c,
-    r: o.f == null ? "—" : fxSgn(fxYiK(o.f), "億"), c: o.f == null ? "neutral" : fxC(o.f) }));
+    r: o.f == null ? "—" : fxSgn(fxYiK(o.f), "億"), c: o.f == null ? "neutral" : fxC(o.f),
+    ...(o.n != null ? { r2: fxLots(o.n) } : {}) }));
   return { title: "土洋同買", sub: `資料日 ${b.date}`, rows,
     note: ["依外資當日買超金額降序（歷史 Q1 中位數 +1.74%）、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
 }
@@ -1762,7 +1783,9 @@ function fxCardInstRank(s, key, label) {  // flows-foreign-1／flows-trust-1 買
   const pg = fxNeed(s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages[key], `flowsLatest pages.${key}`);
   const buy = (pg.buy_by_amt || []).slice(0, 5), sell = (pg.sell_by_amt || []).slice(0, 5);
   if (!buy.length && !sell.length) throw new Error(`${key} buy_by_amt/sell_by_amt 空`);
-  const mk = (r) => ({ l: r.code, m: r.name, r: fxSgn(fxYiK(r.net_amt_k), "億"), c: fxC(r.net_amt_k) });
+  // r2 張數：latest.json 有 net_lots 就附（金額為主、張數佐證量體），缺欄則省略
+  const mk = (r) => ({ l: r.code, m: r.name, r: fxSgn(fxYiK(r.net_amt_k), "億"),
+    c: fxC(r.net_amt_k), ...(r.net_lots != null ? { r2: fxLots(r.net_lots) } : {}) });
   return { title: `${label}買賣超排行`, sub: `資料日 ${s.flowsLatest.date}`,
     rows: [...buy.map(mk), ...sell.map(mk)], note: `依${label}買超／賣超金額（net_amt_k）各自降序，買超在前` };
 }
@@ -1870,8 +1893,11 @@ export const CARDS_PUSH_AFTER_MIN = 22 * 60 + 30;   // 台北 22:30（規格 9.1
 // LINE text message 官方上限 5000 字（messaging-api reference #text-message）；
 // 33 卡純文字降級版可能貼近上限，保守截 4900 保整則可發（截尾勝於整則 400 不發）
 const CARDS_TEXT_MAX = 4900;
-// 13 支來源 URL（規格第 9 節逐卡對應表的來源集合；flowsDaily 按日命名）。
+// 14 支來源 URL（規格第 9 節逐卡對應表的來源 13 支＋PNG 渲染 manifest；flowsDaily 按日命名）。
 // base 全用既有常數／慣例：env.DATA_BASE（本 repo data/）、POSTMKT_BASE、flows raw main。
+// manifest＝Actions cards.yml（台北 22:12）用 Pillow 渲染 /cards/data 後 commit 的
+// data/cards/latest/manifest.json——pushDailyCards 只在 manifest.date==今日時把 PNG 掛進
+// Flex hero（spec 3C 呈現層改向），非當日／缺檔一律文字版（昨日圖絕不誤用）。
 export function cardSourceUrls(env, dateISO) {
   const V2 = env.DATA_BASE;
   return {
@@ -1888,13 +1914,15 @@ export function cardSourceUrls(env, dateISO) {
     flowsDaily:     `${FLOWS_RAW_BASE}/data/daily/${dateISO.replaceAll("-", "")}.json`,
     postmkt:        `${POSTMKT_BASE}/data/postmkt.json`,
     mktbal:         `${POSTMKT_BASE}/data/market_balance_history.json`,
+    manifest:       `${V2}/cards/latest/manifest.json`,
   };
 }
-// fetch 編排：13 支各自獨立 try/catch，失敗給 null（buildDailyCards 對 null 源已能逐卡降級）。
+// fetch 編排：14 支各自獨立 try/catch，失敗給 null（buildDailyCards 對 null 源已能逐卡降級）。
 // opts.getProduct 沿用 runEvening 的 getP 快取——postmkt.json（2.4MB）若 summary 步同一次
 // 喚醒已抓過，這裡直接吃快取不重抓（快取鍵＝原始 URL，fetchProduct 的 cache-buster 不影響）。
 // VIX 走既有 finFuturesVix（其內部用全域 fetch、非注入式）——僅在 FINMIND_TOKEN 有設時打，
 // 失敗給 null（v2-global-1 顯「—」不擋卡）；離線測試不設 token 即零真實網路。
+// opts.noVix：/cards/data 端點用（FX_ACTIVE_CARDS 11 張皆不用 vix，公開端點不必打 FinMind）。
 export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
   const getP = opts.getProduct || ((u) => fetchProduct(u, fetchFn).catch(() => null));
   const urls = cardSourceUrls(env, tp.date);
@@ -1902,11 +1930,43 @@ export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
   await Promise.all(Object.entries(urls).map(async ([k, u]) => {
     try { src[k] = await getP(u); } catch { src[k] = null; }
   }));
-  if (env.FINMIND_TOKEN) {
+  if (env.FINMIND_TOKEN && !opts.noVix) {
     try { src.vix = await finFuturesVix(env.FINMIND_TOKEN, tp.date); }
     catch (e) { console.log("cards vix:", e && e.message); }
   }
   return src;
+}
+// /cards/data 端點主體（PNG 渲染管線的上游，spec 3C）：卡片邏輯唯一來源＝
+// buildDailyCards，Python 只渲染不算數。輸出＝FX_ACTIVE_CARDS 過濾＋assertCardAllowed
+// 縱深過濾後的卡片資料（與 pushDailyCards ⑤ 同一套守門——PNG 與文字版看到同一份內容）。
+// 資料全是公開 raw JSON 的加工，無需鑑權；noVix＝活躍 11 張皆不用 vix，不打 FinMind。
+export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
+  const src = await fetchCardSources(env, tp, fetchFn, { ...opts, noVix: true });
+  const built = buildDailyCards(src);
+  const cards = [];
+  for (const c of built.cards) {
+    if (!FX_ACTIVE_CARDS.has(c.id)) continue;
+    try { assertCardAllowed(c); cards.push(c); }
+    catch (e) { console.log("cards/data 過濾剔除:", c.id, e && e.message); }
+  }
+  return { date: src.dateStr, cards };
+}
+// manifest（data/cards/latest/manifest.json）→ 逐卡掛 img/imgRatio。守門：
+// manifest.date 必須等於台北今日（昨日圖絕不誤用）；URL 必須 https；ratio 需 W:H 格式。
+// 掛不上的卡維持文字 bubble（cardBubble 對無 img 卡走原版型）——退場永遠可用。
+export function attachCardImages(cards, manifest, dateISO) {
+  if (!manifest || String(manifest.date || "").slice(0, 10) !== dateISO
+    || !manifest.images || typeof manifest.images !== "object") return 0;
+  let n = 0;
+  for (const c of cards) {
+    const u = manifest.images[c.id];
+    if (typeof u !== "string" || !u.startsWith("https://")) continue;
+    c.img = u;
+    const r = manifest.ratios && manifest.ratios[c.id];
+    if (typeof r === "string" && /^\d+:\d+$/.test(r)) c.imgRatio = r;
+    n++;
+  }
+  return n;
 }
 // 發送流程（規格 5 節＋任務 B2 定案）：時間守門 → 通道守門 → KV 去重 → 抓源 →
 // baseline 交易日守門 → 組卡＋assertCardAllowed 縱深過濾 → 0 卡記 skip →
@@ -1939,8 +1999,12 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
       console.log("cards 預過濾剔除:", c.id, e && e.message);
     }
   }
+  // ⑤b PNG hero（spec 3C）：manifest 當日才掛圖，非當日／缺檔＝0 張掛圖＝整批文字版。
+  //    只影響 Flex 版型（cardBubble 對有 img 卡出 hero）；fallback 純文字不受影響——
+  //    卡物件保留 rows/paras 原資料，數字版內容兩條路徑一致。
+  const imgs = attachCardImages(cards, src.manifest, tp.date);
   if (opts.dry) return { name: "cards", wouldPush: cards.length,
-    skippedCards: built.skipped.length, dropped: dropped.length };
+    skippedCards: built.skipped.length, dropped: dropped.length, imgs };
   // ⑥ 0 卡不推：寫 KV 記 skip 後短路（0 卡之夜後續喚醒不再白抓 13 支）
   if (!cards.length) {
     if (env.FLOW_KV) await env.FLOW_KV.put(key, "skip-empty", { expirationTtl: ALERTED_TTL });
@@ -1986,7 +2050,7 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
       `圖卡 LINE 通道全敗（已由 webhook 送達）：${errs.join("；")}`, fetchFn);
   if (env.FLOW_KV) await env.FLOW_KV.put(key, "pushed", { expirationTtl: ALERTED_TTL });
   const out = { name: "cards", sent: true, via: sentVia, cards: cards.length,
-    skippedCards: built.skipped.length };
+    skippedCards: built.skipped.length, imgs };
   if (dropped.length) out.dropped = dropped.length;
   if (errs.length) out.errors = errs;
   return out;
@@ -2801,6 +2865,22 @@ export default {
       const body = idsRaw === null ? stocks[0] : { stocks, date };
       return json(body, { "Cache-Control": "public, max-age=1800" });
     }
+    if (url.pathname === "/cards/data") {  // LINE 圖卡資料（PNG 渲染管線上游，spec 3C）
+      // cf 快取 5 分鐘（caches.default，同 /live 慣例）：Actions 22:12 渲染班打一次、
+      // 其餘流量吃快取；來源全為公開 raw JSON 的加工，無需鑑權。
+      const cache = caches.default;
+      const cacheKey = new Request(new URL("/cards/data", url.origin).toString());
+      const hit = await cache.match(cacheKey);
+      if (hit) return hit;
+      try {
+        const body = await buildCardsData(env, taipeiParts(), fetch);
+        const resp = json(body, { "Cache-Control": "public, max-age=300" });
+        ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname === "/replay") {  // 第五期：當日回放（frame 當日不變 → 命中時短快取 60s）
       const dq = url.searchParams.get("date") || "";   // date 僅供驗證/測試（正式前端不帶＝台北今日）
       const d = /^\d{4}-\d{2}-\d{2}$/.test(dq) ? dq : taipeiParts().date;
@@ -2902,7 +2982,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening", "/health", "/jobs"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/cards/data", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening", "/health", "/jobs"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {

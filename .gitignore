@@ -5,6 +5,7 @@ venv/
 .venv/
 .DS_Store
 node_modules/
+fonts/
 .wrangler/
 worker/.dev.vars
 backtest/cache/
