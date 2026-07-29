@@ -1,11 +1,19 @@
-// 離線移植正確性測試：用 V1 產出的 data/live.json 反推快照列，餵進 Worker 的 aggregate()，
+// 離線移植正確性測試：用 V1 產出的 live.json 反推快照列，餵進 Worker 的 aggregate()，
 // 比對是否重現 V1 的 market / exchange / stocks 數字。無需 FINMIND token。
+//
+// 素材固定讀 test/fixtures/，不讀 ../../data/。三個檔都取自 commit 47cd70e（V1 凍結點）：
+//   live.json     ts 2026-07-01 14:30（V1 最後一份輸出，之後不再產生）
+//   classify.json generated_at 2026-06-28（產生 live.json 當時的產業分類）
+//   lastweek.json week 2026-06-22（07-01 的上一自然週）
+// 2026-07-29 前是直接讀 ../../data/，但那裡的 classify/lastweek 會被 meta.yml 與
+// lastweek.yml 持續更新（每週一次），拿新輸入去對 07-01 的舊答案必然不符——曾造成
+// 31 項假失敗（exchange.n/amt_yi/pts 與 stocks.lw）。改讀凍結素材後 310 項全過。
 //
 // 執行：cd worker && node test/parity.mjs
 import { readFileSync } from "node:fs";
 import { aggregate } from "../src/index.js";
 
-const DATA = new URL("../../data/", import.meta.url);
+const DATA = new URL("./fixtures/", import.meta.url);
 const rd = (f) => JSON.parse(readFileSync(new URL(f, DATA), "utf-8"));
 const classify = rd("classify.json");
 const lastweek = rd("lastweek.json");
