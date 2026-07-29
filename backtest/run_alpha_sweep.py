@@ -86,10 +86,10 @@ DIR_LABEL = {"long": "做多", "short": "做空", "both": "雙邊（計 2）"}
 # 前 4 項＝預註冊書 §2.2 原文摘要；第 5 項＝實作層偏離揭露（fresh-context 驗收
 # 1cc5466 的必修項：只寫在程式註解、報告不印，讀者會誤以為測的是生產自然週口徑）
 KNOWN_BIASES = [
-    "**外資口徑少一塊**：快取的 inst 只收 `Investment_Trust` + `Foreign_Investor`，"
-    "生產的外資＝`Foreign_Investor + Foreign_Dealer_Self`（`taiwan-flows/src/pipeline.py:12`）。"
-    "AS-01~04 的外資金額因此略小於線上值；未修之前，AS-01~04 的結論只適用於"
-    "「不含外資自營」的口徑。",
+    "**外資口徑（2026-07-29 起已對齊生產）**：fetch.py 現收 `Foreign_Investor + "
+    "Foreign_Dealer_Self`（＝生產口徑，`taiwan-flows/src/pipeline.py:12`）。"
+    "第一版報告（commit 04ba1ad）的快取只含 `Foreign_Investor`，本版為口徑覆核重跑"
+    "（預註冊 §5）；若本快取為舊版抓取，AS-01~04 結論僅適用不含外資自營口徑。",
     "**快取無自營**：所以完全沒有涉及自營的候選。",
     "**`Trading_Volume` 未存**：快取只有 `Trading_money`（`fetch.py:88`）。"
     "用金額當成交量的代理會失真（金額＝量×均價），所以量能類指標全部不列入第一階段。",
