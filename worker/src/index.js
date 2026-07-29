@@ -1830,6 +1830,17 @@ export const FX_CARD_BUILDERS = [
   ["pm-lending-4", (s) => fxCardLending(s, "sbl_short_bal", "借賣餘額排行", "借賣餘額")],
   ["pm-lending-6", (s) => fxCardLending(s, "margin_bal", "融資餘額排行", "融資餘額")],
 ];
+// 2026-07-30 內容裁剪（使用者授權以投資人角度評選）：39→11 張，判準＝
+// 「不開網站也想送到眼前、會影響明天的決定、更新頻率配得上每日推播」。
+// builder 全保留——砍掉的卡加回這個清單即復活。詳見 spec 3C 節。
+export const FX_ACTIVE_CARDS = new Set([
+  "v2-ov-1", "v2-ov-6",                       // 大盤總結、次產業貢獻發散
+  "flows-hdr-1", "flows-hdr-2",               // 三大法人、台指期未平倉
+  "flows-foreign-1", "flows-trust-1",         // 外資／投信買賣超排行
+  "pm-aetf-5",                                // 主動ETF進出個股（差異化資訊）
+  "sig-sub-surge", "sig-dual-buy",            // 卡1 次產業湧入、卡2 土洋同買
+  "sig-exit-sell", "sig-surge-warn",          // 卡5 退出＋法人賣、卡6 追高警示
+]);
 export function buildDailyCards(src) {
   const s = src || {};
   // ctx 三件各自帶保底：任何一件建構失敗只降級該件（names 空 Map／regime 未判定／
@@ -1921,6 +1932,7 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   const built = buildDailyCards(src);
   const cards = [], dropped = [];
   for (const c of built.cards) {
+    if (!FX_ACTIVE_CARDS.has(c.id)) continue;   // 內容裁剪白名單（spec 3C）
     try { assertCardAllowed(c); cards.push(c); }
     catch (e) {
       dropped.push({ id: c.id, reason: String((e && e.message) || e) });

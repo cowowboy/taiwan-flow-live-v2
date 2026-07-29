@@ -495,3 +495,27 @@ M1 原本就採 R 值，結論不變；S2 見第 3 節卡 5。其餘排序欄平
       單一來源缺失 → 對應卡 skipped 其他不受影響
 - [ ] `worker/test/` 既有測試零回歸
 - [ ] fresh-context subagent 驗收（鐵律 #3）
+
+---
+
+## 3C. 內容裁剪（2026-07-30，使用者授權全權評選）
+
+首晚實推後使用者判定內容不夠實用，授權以投資人角度重選。判準三條：
+**不開網站也想送到眼前／會影響明天的決定／更新頻率配得上每日推播**。
+
+**39 → 11 張**（`FX_ACTIVE_CARDS` 白名單，builder 全保留、加回清單即復活）：
+留 `v2-ov-1`、`v2-ov-6`、`flows-hdr-1/2`、`flows-foreign-1`、`flows-trust-1`、
+`pm-aetf-5`、訊號卡 1/2/5/6。11＋免責＝12 bubble＝單一 carousel。
+
+砍 22 張的理由分四類：重複（global-1/ov-5/ov-7/ov-8/ov-14/chain-1/rank-1/morning-3）、
+晚間已過時（morning-2 是 D-1 晨報、morning-4 是昨晚美股而今晚美股已開盤）、
+慢變數週看即可（mktbal-1/2、ff-1、etf-1、lending-3/4/6）、
+回測無正向依據或有更強子集（卡 3 母體超額為負、卡 4 讓位給卡 5、aetf-2/4、block-1）。
+
+**呈現層改向（同日決定）**：使用者提供參考風格（深藍底＋金色漸層條＋獎牌排行圖卡），
+呈現改為 **Pillow 產 PNG 嵌 Flex hero**。原「第二期 treemap/象限圖」取消，
+由本方向取代。架構：Worker `/cards/data` 端點輸出 buildDailyCards 結果
+（卡片邏輯唯一來源，Python 只渲染不算數）→ Actions 晚班 Pillow 渲染 →
+commit → Pages 供 HTTPS URL → Flex bubble hero 引用；PNG 缺席退文字版。
+理由：一次 push 上限 5 message，11 張獨立圖片訊息塞不下，PNG-in-Flex
+維持單 carousel。`flows-sync-1` 解鎖路徑保留（口徑覆核通過後 +1 張）。
