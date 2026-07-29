@@ -11,7 +11,8 @@
 #           右側數值（正紅負綠、千分位）；底部灰字 note＋免責句。
 #   看板卡（DASH_IDS：ov-1 總結／hdr-1 三大法人／hdr-2 台指期）：同色系 2 欄大數字格。
 #   paras 卡（如 pm-aetf-5）：置中大字逐段。
-#   寬固定 1040px、高依內容動態（排行每列 96px）；輸出 PNG 需 <1MB（有斷言）。
+#   以 1040px 寬設計、高依內容動態（排行每列 96px）；**輸出前一律縮到 LINE Flex image
+#   的 1024×1024 上限內**（fit_line_limit，兩軸都限，官方三處一致），PNG <1MB。
 #
 # 字型：Noto Sans TC。找 <repo>/fonts/NotoSansTC-Bold.otf 與 -Regular.otf（不進 git，
 # cards.yml 下載＋actions/cache）；缺檔印明確錯誤退出非 0。--font-fallback 僅供無字型
@@ -42,7 +43,8 @@ FONT_DIR = ROOT / "fonts"
 
 W = 1040                      # 固定寬
 ROW_H = 96                    # 排行卡每列高
-MAX_PNG_BYTES = 1_000_000     # LINE hero 圖保守上限（<1MB）
+MAX_PNG_BYTES = 1_000_000     # LINE hero 圖保守上限（官方建議 ≤1MB；硬上限 10MB）
+LINE_IMG_MAX = 1024           # LINE Flex image 官方上限 1024×1024 px（兩軸都限）
 DISCLAIMER = "數據僅供參考，不代表投資建議"
 
 # 看板卡（非排行型）：大數字格版型
@@ -381,11 +383,38 @@ def fetch_cards(worker_base: str) -> dict:
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def fit_line_limit(img):
+    """縮到 LINE Flex image 的 1024×1024 上限內（等比、LANCZOS）。
+
+    官方三處一致（reference #f-image、OpenAPI FlexImage.url、Flex Simulator 教學）：
+    `Max image size: 1024 x 1024 pixels`——**兩軸都限**，非只限寬。
+    超標後果官方未載明（縮放／裁切／不顯示皆有可能），故一律縮到合規再送。
+
+    設計採「輸出前統一縮放」而非調小版型常數：卡的列數隨當日訊號數變動，
+    改常數只能保證某個列數合規，縮放守門則任何內容都擋得住。
+    以 1040 寬設計、縮到 ≤1024 後在手機上仍遠高於 bubble 實際顯示寬。
+    """
+    w, h = img.width, img.height
+    if w <= LINE_IMG_MAX and h <= LINE_IMG_MAX:
+        return img
+    from PIL import Image
+    s = min(LINE_IMG_MAX / w, LINE_IMG_MAX / h)
+    return img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
+
+
 def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
+    # date ＝ Worker /cards/data 回的**資料日**（baseline.date），非渲染當日。
+    # 缺或格式不對就拒渲染：manifest 沒有可信日期時，寧可當晚退文字版，
+    # 也不能產出「日期不明」的圖讓 attachCardImages 有機會誤放行。
+    date = str(data.get("date") or "")
+    if not _DATE_RE.match(date):
+        raise SystemExit(f"ERROR: /cards/data 未回可信資料日（date={date!r}）——拒渲染，當晚退文字版")
     out_dir.mkdir(parents=True, exist_ok=True)
     for p in out_dir.glob("*.png"):   # 清掉上一日殘圖（manifest 是唯一權威，殘檔只會誤導）
         p.unlink()
-    date = str(data.get("date", ""))
     images, ratios = {}, {}
     for card in data.get("cards") or []:
         cid = str(card.get("id", ""))
@@ -396,6 +425,7 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
         if img is None:
             print(f"WARN: 卡 {cid} 無 rows/paras 可渲染（跳過）", file=sys.stderr)
             continue
+        img = fit_line_limit(img)
         path = out_dir / f"{cid}.png"
         img.save(path, format="PNG", optimize=True)
         size = path.stat().st_size

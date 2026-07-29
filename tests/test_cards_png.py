@@ -4,7 +4,7 @@
 # 暫存目錄，驗——
 #   1. 純函式：parse_value（抽數值供橫條比例化）／bar_width（最大值滿條、比例化、
 #      非零下限）／fmt_thousands（千分位）
-#   2. 端對端：每張卡產出 PNG、寬 1040、檔案 <1MB；manifest 的 date／raw URL（帶 ?d=
+#   2. 端對端：每張卡產出 PNG、兩軸 ≤1024（LINE 上限）、檔案 <1MB；manifest 的 date／raw URL（帶 ?d=
 #      破快取 query）／ratios 與實際圖檔一致
 #   3. 版型分派：看板卡（DASH_IDS）／排行卡／paras 卡都走得通（fixture 三型都有）
 #
@@ -91,7 +91,12 @@ def test_render_end_to_end():
         for cid in ids:
             p = out / f"{cid}.png"
             img = Image.open(p)
-            check(f"{cid}: 寬 1040", img.width == bc.W)
+            # LINE Flex image 官方上限 1024×1024（兩軸都限）——縮放守門後必須合規
+            check(f"{cid}: 寬 ≤1024（實 {img.width}）", img.width <= bc.LINE_IMG_MAX)
+            check(f"{cid}: 高 ≤1024（實 {img.height}）", img.height <= bc.LINE_IMG_MAX)
+            check(f"{cid}: 尺寸合理（{img.width}x{img.height}）",
+                  img.width == bc.LINE_IMG_MAX or img.height == bc.LINE_IMG_MAX
+                  or img.width == bc.W)
             check(f"{cid}: 高為正且動態（>300）", img.height > 300)
             check(f"{cid}: bytes < 1MB", p.stat().st_size < bc.MAX_PNG_BYTES)
             check(f"{cid}: manifest ratio 與圖檔一致",
@@ -99,11 +104,17 @@ def test_render_end_to_end():
             check(f"{cid}: URL 帶 ?d= 破快取且指向 raw latest",
                   manifest["images"][cid]
                   == f"{bc.RAW_BASE}/{cid}.png?d={data['date']}")
-        # 版型分派：排行卡高度隨列數走（10 列外資排行 > 3 列土洋同買）
+        # 版型分派：排行卡高度隨列數走。落檔會經 fit_line_limit 等比縮放，
+        # 逐列高度的算術只在**縮放前**精確成立，故拆成兩條分開驗：
+        card_f = next(c for c in data["cards"] if c["id"] == "flows-foreign-1")
+        card_d = next(c for c in data["cards"] if c["id"] == "sig-dual-buy")
+        raw_f = bc.render_card(card_f, F_B, F_R).height
+        raw_d = bc.render_card(card_d, F_B, F_R).height
+        check("（縮放前）排行卡高度隨列數動態：10 列較 3 列高 ≥6 個列高",
+              raw_f - raw_d >= 6 * bc.ROW_H)
         h_foreign = Image.open(out / "flows-foreign-1.png").height
         h_dual = Image.open(out / "sig-dual-buy.png").height
-        check("排行卡高度隨列數動態（10 列 > 3 列）",
-              h_foreign - h_dual >= 6 * bc.ROW_H)
+        check(f"（落檔後）列多者仍較高（{h_foreign} > {h_dual}）", h_foreign > h_dual)
         mf = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         check("manifest.json 落地且含 generated_at（+08:00）",
               mf["images"] == manifest["images"] and "+08:00" in mf["generated_at"])

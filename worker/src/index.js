@@ -1949,7 +1949,12 @@ export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
     try { assertCardAllowed(c); cards.push(c); }
     catch (e) { console.log("cards/data 過濾剔除:", c.id, e && e.message); }
   }
-  return { date: src.dateStr, cards };
+  // date ＝**資料日**（baseline.date）而非渲染當日。這是守門語意的關鍵：上游遲到時
+  // 卡片內容是昨日資料，manifest.date 就該是昨日，attachCardImages 的當日比對才會
+  // 正確拒用——若標成渲染當日，會出現「今日 manifest 裝昨日數字」而被放行
+  // （2026-07-30 PNG 管線驗收發現 1）。baseline 缺 → date=null → Python 拒渲染。
+  const dataDate = src.baseline && src.baseline.date ? String(src.baseline.date).slice(0, 10) : null;
+  return { date: dataDate, renderedFor: src.dateStr, cards };
 }
 // manifest（data/cards/latest/manifest.json）→ 逐卡掛 img/imgRatio。守門：
 // manifest.date 必須等於台北今日（昨日圖絕不誤用）；URL 必須 https；ratio 需 W:H 格式。
