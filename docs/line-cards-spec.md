@@ -34,8 +34,8 @@ LINE 的計費單位是**收訊人數**，不是 message object 數、也不是 
 計費不隨 bubble 數變動——按收訊人數算，1 位收訊人 × 1 次 push ＝ 1 則。
 每月仍是 22 則，佔日本免費方案 200 則的 11%。
 
-> ⚠️ 200 則是**日本**方案的官方 example，台灣方案數字未查證（見第 7 節）。實作時先打
-> `GET https://api.line.me/v2/bot/message/quota` 確認本帳號實際額度，再決定要不要縮頻。
+> ✅ **本帳號實測額度已確認（2026-07-29）**：`GET /v2/bot/message/quota` 回
+> `{"type":"limited","value":200}`——每月 200 則，與上表假設一致。22 推/月佔 11%，定案。
 
 ---
 
@@ -354,7 +354,7 @@ AS-11 的反向資訊（RSI(5)<20 後續**繼續弱**，跌深買進不成立）
 - [ ] 純文字降級版在 Flex 建構丟例外時仍可產出
 - [ ] `worker/test/alerts.mjs` 既有 43 項全過（不得回歸）
 - [ ] 新增測試檔納入 `worker/test/`，離線可跑
-- [ ] `GET /v2/bot/message/quota` 實測本帳號額度，把實際數字補回本文件第 1 節
+- [x] `GET /v2/bot/message/quota` 實測本帳號額度（2026-07-29：limited 200/月），已補回第 1 節
 - [ ] **線上驗證**：實際推一則到 LINE，手機確認版型正確、紅綠配色正確、無截字
 - [ ] fresh-context subagent 驗收通過（改動者不得自驗，鐵律 #3）
 
@@ -365,9 +365,8 @@ AS-11 的反向資訊（RSI(5)<20 後續**繼續弱**，跌深買進不成立）
 以下沒有官方依據，實作時遇到請實測或走 validate 端點
 （`POST https://api.line.me/v2/bot/message/validate/push`）：
 
-1. **台灣免費方案每月則數。** 官方只有日本 example（200 則/月）。
-   台灣頁面 `tw.linebiz.com` 被本 session 的 egress policy 擋住，無法查證。
-   → 用 `GET /v2/bot/message/quota` 問自己的帳號最準。
+1. ~~台灣免費方案每月則數~~ **已解（2026-07-29）**：本帳號實測
+   `GET /v2/bot/message/quota` → `{"type":"limited","value":200}`，每月 200 則。
 2. **carousel 超過 12 bubble 的確切行為**（400／截斷／只渲染前 12）。官方未明寫。
 3. **`altText` 超過 1500 字的確切行為**（400／自動截斷）。官方未明寫。
 4. **Flex text 元件的字數上限**——官方**確實沒有規定**（逐欄看完 spec 無 "Max character limit"）。
