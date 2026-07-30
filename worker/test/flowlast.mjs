@@ -2,7 +2,7 @@
 // 寫入窗口 / payload 產生 / storeFlowLast 守門 / attachFlowLast 附掛規則。
 // 執行：cd worker && node test/flowlast.mjs
 import {
-  inFlowLastWindow, flowLastPayload, storeFlowLast, attachFlowLast,
+  inFlowLastWindow, flowLastPayload, storeFlowLast, attachFlowLast, flowDegenerate, framesDegenerate, CLOSE_MIN,
   FLOW_LAST_KEY, FLOW_LAST_TTL, taipeiParts,
 } from "../src/index.js";
 
@@ -160,6 +160,61 @@ const FLOW = { wins: { w1: 10, w2: 30 }, baseline_date: "2026-07-16",
   const l5 = mkLive(null);
   await attachFlowLast({}, l5);
   chk("無 FLOW_KV 不炸", l5.flow_last === undefined);
+}
+
+// ---- 5. 收盤殘影（2026-07-30 修的 bug）----
+// 收盤後 live.flow 不是 null，而是「窗起點已 ≥13:30、Δ 只剩盤後定價雜訊」的殘影。
+// 舊閘門 `flow != null` 因此直接 return，flow_last 整晚不掛、案四收盤定格失效。
+// computeFlow 現在會標 flow.degenerate；這裡驗標記語意與 attach/store 的行為。
+{
+  const mk = (deg, frames) => ({ ...FLOW, degenerate: deg, frames: frames || FLOW.frames });
+  chk("degenerate=false → 不算殘影", !flowDegenerate(mk(false)));
+  chk("degenerate=true → 算殘影", flowDegenerate(mk(true)));
+  chk("null → 算殘影", flowDegenerate(null));
+  // 舊 payload（無 degenerate 欄）→ 退回「兩窗同格」近似
+  chk("舊payload 兩窗同格 → 殘影", flowDegenerate({ frames: { 10: "13:35", 30: "13:35" } }));
+  chk("舊payload 兩窗不同格 → 非殘影", !flowDegenerate({ frames: { 10: "13:20", 30: "13:00" } }));
+  // 開盤初期：只有 10 分窗、d30_yi=null —— 不得被判成殘影（這是上一版的迴歸）
+  chk("開盤只有10分窗（d30_yi=null）→ 非殘影",
+    !flowDegenerate({ degenerate: false, frames: { 10: "09:05" }, mkt: { d10_yi: 66.9, d30_yi: null } }));
+
+  const payload = flowLastPayload(mkLive(FLOW));
+  let gets = 0;
+  const spyKV = { async get(k, t) { gets++; return t === "json" ? payload : JSON.stringify(payload); }, async put() {} };
+
+  const ld = mkLive(mk(true, { 10: "13:35", 30: "13:35" }));
+  await attachFlowLast({ FLOW_KV: spyKV }, ld);
+  chk("殘影 flow → 附 flow_last（收盤定格復活）", ld.flow_last && ld.flow_last.mkt.d30_yi === 350.25, `gets=${gets}`);
+
+  // 開盤初期也要附（成本一次 get），讓前端各分頁自己選——不得因 d30_yi=null 就不附
+  gets = 0;
+  const lo = mkLive({ degenerate: false, frames: { 10: "09:05" }, subs: FLOW.subs, mkt: { d10_yi: 66.9, d30_yi: null } });
+  await attachFlowLast({ FLOW_KV: spyKV }, lo);
+  chk("開盤初期非殘影 → 不附不讀（即時資料有效）", lo.flow_last === undefined && gets === 0, `gets=${gets}`);
+
+  // 寫入路徑：殘影不得被存成定格
+  const kvD = mockKV();
+  const rD = await storeFlowLast({ FLOW_KV: kvD }, mkLive(mk(true)), tp("2026-07-30T13:30:00"));
+  chk("窗口內但 flow 是殘影 → 不寫", rD.stored === false && kvD.puts.length === 0, JSON.stringify(rD));
+  const kvH = mockKV();
+  const rH = await storeFlowLast({ FLOW_KV: kvH }, mkLive(mk(false)), tp("2026-07-30T13:30:00"));
+  chk("窗口內且 flow 健康 → 照舊寫入", rH.stored === true && kvH.puts.length === 1, JSON.stringify(rH));
+}
+
+// ---- 6. framesDegenerate 的門檻（收盤 13:30）----
+// 門檻寫錯不會讓上面任何一條紅（它們都直接餵 degenerate 旗標），所以這裡直接釘住。
+// 13:36–14:04 這段兩窗還「不同格」，光看 frames 相不相同抓不到——必須看窗起點。
+{
+  chk("CLOSE_MIN = 13:30", CLOSE_MIN === 13 * 60 + 30, String(CLOSE_MIN));
+  const D = (hm) => framesDegenerate({ 10: hm }, 10);
+  chk("起點 09:05（開盤初期）→ 非殘影", !D("09:05"));
+  chk("起點 13:19 → 非殘影", !D("13:19"));
+  chk("起點 13:26（ts 13:36，涵蓋收盤撮合）→ 非殘影", !D("13:26"));
+  chk("起點 13:29 → 非殘影（最後一分鐘仍是盤中）", !D("13:29"));
+  chk("起點 13:30（收盤）→ 殘影", D("13:30"));
+  chk("起點 13:31（ts 13:41，純盤後）→ 殘影", D("13:31"));
+  chk("起點 13:35（ts≥13:45，frame 最後一格）→ 殘影", D("13:35"));
+  chk("無該窗 frame → 視為殘影", framesDegenerate({}, 10) && framesDegenerate(null, 10));
 }
 
 console.log(`flowlast: pass=${pass} fail=${fail}`);
