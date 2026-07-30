@@ -152,6 +152,31 @@ def main():
                 out["etfs"][code] = carried
                 print(f"{code} {name}: 全數重試失敗，沿用上次快照（src={carried.get('src_date')}）", flush=True)
         time.sleep(0.3)   # FinMind 請求間節流（擴充後檔數上升）
+
+    # ---- 投信端點補位（2026-07-31）----
+    # FinMind 對統一／野村等投信慢一個交易日，該批檔每天被 diff.py 列為 laggards、
+    # 不併入共識聚合。對已登記的檔改向投信端點補抓，只有拿到「比 FinMind 更新的基準日」
+    # 才覆蓋；抓不到／日期無法折算一律略過，退回補位前行為。整段包 try——補位壞掉
+    # 不得影響主幹 FinMind 的產出。
+    try:
+        import aetf_fallback
+        fb = aetf_fallback.fetch_fallback(list(out["etfs"]))
+        for code, d in fb.items():
+            cur = out["etfs"].get(code) or {}
+            if str(d["src_date"]).replace("-", "/") <= str(cur.get("src_date") or "").replace("-", "/"):
+                continue   # 沒有比較新，不覆蓋
+            before = cur.get("src_date")
+            cur.update({"stocks": d["stocks"], "src_date": d["src_date"],
+                        "aum": d["aum"], "source": f"issuer:{d['fallback_src']}"})
+            cur.pop("not_advanced", None)
+            cur.pop("stale", None)
+            out["etfs"][code] = cur
+            out.setdefault("fallback_used", {})[code] = {
+                "issuer": d["fallback_src"], "from": before, "to": d["src_date"]}
+            print(f"{code} 補位：{before} → {d['src_date']}（{d['fallback_src']}）", flush=True)
+    except Exception as e:
+        print(f"補位整段失敗（不影響主幹）：{type(e).__name__}: {e}", flush=True)
+
     if not out["etfs"]:
         raise RuntimeError("全部失敗，不寫檔")
     body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
