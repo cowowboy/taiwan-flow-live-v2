@@ -365,10 +365,26 @@ function flowLastUsable(){
   const fl=state.live.flow_last;
   return (fl&&fl.subs&&fl.mkt&&fl.mkt.d30_yi!=null)?fl:null;
 }
+// ---- 收盤殘影判定（2026-07-30）與 worker/src/index.js 的 flowDegenerate 同一套，改一邊要改另一邊 ----
+// 收盤後 live.flow **不是 null**，而是「窗起點已 ≥13:30、Δ 只剩盤後定價雜訊」的殘影物件，
+// 所以不能用 `flow != null` 或 `d30_yi 為真` 判斷即時資料是否生效（理由見 worker 端註解）。
+// 不用單一「可用」布林值：三個消費者要的欄位不同，綁在一起會互相誤傷——
+//   湧入/退出排行 需要 subs，但**不需要** d30_yi（開盤 09:10–09:30 只有 10 分窗、d30_yi 是
+//     null，那時今日資料完全有效，不該被 30 分窗的缺席否決成「顯示昨日定格」）
+//   象限圖/treemap 需要 mkt.d30_yi>0（當分母）與逐股 f30，但**不需要** subs（根本不讀）
+function flowDegenerate(f){
+  if(!f)return true;
+  if(f.degenerate!=null)return !!f.degenerate;          // worker 標記優先
+  const fr=f.frames||{}; return !!(fr["10"]&&fr["10"]===fr["30"]);   // 舊 payload 相容近似
+}
+const flowUsableForRank=f=>!flowDegenerate(f)&&Array.isArray(f.subs)&&f.subs.length>0;
+const flowUsableForQuad=f=>!flowDegenerate(f)&&!!(f.mkt&&f.mkt.d30_yi>0);
 // 湧入/退出共用：同一套集中度，依「窗內方向」拆分（漲=買盤湧入、跌=賣壓退出）
 function renderFlow(){
   const out=state.tab==="outflow", word=out?"退出":"湧入";
-  const liveFlow=state.live.flow, last=flowLastUsable();
+  // 判「排行可用」而非「非 null」：收盤後 flow 是殘影，舊寫法會蓋掉收盤定格，
+  // 然後撞下方的退化守門印出「稍後會自動補齊」——而收盤後永遠不會補齊。
+  const liveFlow=flowUsableForRank(state.live.flow)?state.live.flow:null, last=flowLastUsable();
   const fl=liveFlow||last, usingLast=!liveFlow&&!!last;
   FLOW_STK_SRC=usingLast?(last.stocks||{}):null;
   const main=document.getElementById("main");
@@ -960,7 +976,9 @@ function ovTreemapAutoSplit(items){
 function ovFlowLast(){
   const l=state.live;
   if(OV_REPLAY||!l)return null;
-  if(l.flow&&l.flow.mkt&&l.flow.mkt.d30_yi)return null;   // 盤中 flow 生效 → 不用定格
+  // 判「象限可用」而非「d30_yi 為真」：收盤殘影的 d30_yi 是接近 0 的**正數**（truthy），
+  // 舊寫法會誤認成「盤中 flow 生效」，象限圖與 treemap 角標收盤後跟著吃到雜訊。
+  if(flowUsableForQuad(l.flow))return null;               // 盤中 flow 生效 → 不用定格
   const fl=l.flow_last;
   return (fl&&fl.mkt&&fl.mkt.d30_yi&&fl.f30)?fl:null;
 }
@@ -979,8 +997,11 @@ function ovFlowLastBadge(){
 function ovTreemapBadge(amtRaw,f30Raw){
   if(OV_REPLAY)return "";   // 第五期：近30分升降屬短窗，回放模式不適用
   const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
-  const fl=state.live.flow;let d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
-  const last=d30==null?ovFlowLast():null; if(last)d30=last.mkt.d30_yi;   // 案三：盤外退收盤定格
+  // 分子分母**必須同源**：ovF30() 會在定格生效時回 flow_last 的逐股 f30，若這裡的
+  // 分母 d30 還留著即時值，收盤後就會變成「定格分子 ÷ 殘影分母」——實測偏差達 127 倍
+  // （真實30分窗Δ ÷ 盤後定價Δ），每一格都掛↑。所以先問 ovFlowLast()，再決定兩者取哪份。
+  const last=ovFlowLast(), fl=state.live.flow;
+  const d30=last?last.mkt.d30_yi:(fl&&fl.mkt?fl.mkt.d30_yi:null);   // 案三：盤外退收盤定格
   if(!mktAmt||d30==null)return "";
   const fullShr=(amtRaw/1e8)/mktAmt*100, now30=(f30Raw/1e8)/d30*100, diff=now30-fullShr;
   return diff>0.3?'<span class="ovtbadge up">↑</span>':diff<-0.3?'<span class="ovtbadge down">↓</span>':"";
@@ -1080,8 +1101,11 @@ function ovQuadZoomInit(){
 }
 function ovQuadrantHtml(){
   if(OV_REPLAY)return `<div class="loading">回放模式不適用（象限圖需盤中短窗資料；按「回到即時」或切回「地圖」視角）。</div>`;
-  const fl=state.live.flow;let d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
-  const last=d30==null?ovFlowLast():null; if(last)d30=last.mkt.d30_yi;   // 案三：盤外/週末退最後收盤定格
+  // 分子分母**必須同源**：ovF30() 會在定格生效時回 flow_last 的逐股 f30，若這裡的
+  // 分母 d30 還留著即時值，收盤後就會變成「定格分子 ÷ 殘影分母」——實測偏差達 127 倍
+  // （真實30分窗Δ ÷ 盤後定價Δ），每一格都掛↑。所以先問 ovFlowLast()，再決定兩者取哪份。
+  const last=ovFlowLast(), fl=state.live.flow;
+  const d30=last?last.mkt.d30_yi:(fl&&fl.mkt?fl.mkt.d30_yi:null);   // 案三：盤外/週末退最後收盤定格
   const mktAmt=ovMktTseYi();
   if(!d30||!mktAmt)return `<div class="loading">短窗資料未生效：<b>盤中生效</b>（開盤累積約 30 分鐘起）。</div>`;
   const rows=Object.values(OV_SUB_CACHE).sort((a,b)=>b.amt-a.amt).slice(0,OV_QUAD_N).map(s=>{

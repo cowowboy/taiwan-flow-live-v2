@@ -153,7 +153,7 @@ async function buildLive(env) {
   }
 
   // 案三（2026-07-19）：flow 為 null（盤前/盤外/週末/異常）時多 1 次 get 附最後收盤定格
-  // flow_last（additive 頂層欄位；flow 非 null 時不附、不多讀）。既有欄位零改動。
+  // flow_last（additive 頂層欄位；flow 可用時不附、不多讀）。既有欄位零改動。
   await attachFlowLast(env, live);
 
   // 分鐘動能序列（即時一覽 tab 第二期 sparkline）：1 次 get，附近 60 分；失敗不影響 /live 主體
@@ -389,6 +389,15 @@ export async function replayFrame(env, d, t) {
 const frAmt = (v) => (v == null ? null : Array.isArray(v) ? v[0] : v);
 const frClose = (v) => (v == null || !Array.isArray(v) ? null : v[1]);
 
+// 台股收盤 13:30。窗起點一旦到收盤，該窗量到的只可能是盤後定價/零股，不是盤中資金流。
+export const CLOSE_MIN = 13 * 60 + 30;
+// 最短窗的起點是否已到收盤 → 這份 flow 是「收盤殘影」。抽成具名函式是為了讓門檻可被
+// 測試直接釘住（內聯的話改門檻不會有任何測試變紅——實測過）。
+export function framesDegenerate(frameNames, w1) {
+  const hm = frameNames && frameNames[w1];
+  if (!hm) return true;
+  return hm2min(hm) >= CLOSE_MIN;
+}
 export function computeFlow(cl, items, baseline, frames, nowTs) {
   const bl = baseline.stocks || {}, tot5 = baseline.tot5 || 0;
   if (!tot5) return { flow: null, per: {} };
@@ -469,19 +478,30 @@ export function computeFlow(cl, items, baseline, frames, nowTs) {
   // 若某窗當下沒有可比對的 frame（例如開盤剛滿10分還沒有30分窗）該欄位回 null。
   const toYi = (v) => (v == null ? null : Math.round(v / 1e6) / 100);
   const mkt = { d10_yi: toYi(mktD[10]), d30_yi: toYi(mktD[30]) };
+  const frameNames = Object.fromEntries(wins.map((w) => [w, frames[w].name.slice(-5)]));
   const flow = {
     wins: { w1: W1, w2: W2 },
-    frames: Object.fromEntries(wins.map((w) => [w, frames[w].name.slice(-5)])),
+    frames: frameNames,
     baseline_date: baseline.date,
     subs: subList,
     mkt,
+    // 收盤殘影標記（2026-07-30）：storeFrame 在 >13:35 就不落格，但 buildLive 是用
+    // FinMind 快照時戳 live.ts 算窗（不是牆鐘），而 ts 收盤後會前進到 14:30~15:00
+    // （盤後定價/零股）。於是每個窗都挑到最後那幾格，Δ 只剩盤後定價雜訊：
+    //   ts ≥ 14:05      → 兩窗挑到同一格，連窗內方向都算不出來
+    //   ts 13:36~14:04  → 兩窗還不同格，但短窗起點已 ≥13:30，c1/r10 全是假的
+    // 判準取「最短窗的起點是否已到收盤（13:30）」——收盤後開始的窗，量到的必然
+    // 只有盤後定價。這同時涵蓋上面兩種，且不誤傷開盤初期（09:15 時起點 09:05）。
+    // 下游（attachFlowLast、前端）據此退回收盤定格，不要各自去猜。
+    degenerate: framesDegenerate(frameNames, W1),
   };
   return { flow, per: stockFlow };
 }
 
 // ---- 案三（2026-07-19）：收盤前定格 flow:last ——盤外/週末即時一覽「象限圖＋treemap 角標」fallback ----
-// 動機：flow 盤外為 null、frame TTL 2 天 → 盤外沒有短窗資料可退回；收盤前把最後一份非 null flow
-//   定格存 KV，/live 於 flow=null 時附頂層 flow_last，前端僅象限圖與角標退回定格值（標註資料日）。
+// 動機：flow 盤外為 null、frame TTL 2 天 → 盤外沒有短窗資料可退回；收盤前把最後一份可用 flow
+//   定格存 KV，/live 於 flow 為 null 或收盤殘影時附頂層 flow_last（標註資料日）。
+//   消費者：象限圖＋treemap 角標（案三）與 湧入/退出 tab（案四）。
 // 寫入路徑：只走 frame cron 保底（scheduled 於台北平日 13:25–13:40 每分鐘 buildLive→storeFlowLast），
 //   /live 流量路徑不寫——寫入次數固定 ≤16/日，不隨流量浮動。
 // KV write 預算（免費 1000/日）：既有 frame+fi+series 每盤中分鐘 ≤3 put（~275 分 ≈825）＋alerts/err/哨兵
@@ -526,17 +546,32 @@ export function flowLastPayload(live) {
     mkt: { d10_yi: fl.mkt.d10_yi, d30_yi: fl.mkt.d30_yi }, f30,
     subs: fl.subs, frames: fl.frames, baseline_date: fl.baseline_date, stocks };
 }
-// 窗口內且 flow 非 null 才覆寫單一 key（冪等；TTL 7 天）
+// flow 是否為「收盤殘影」——收盤後的退化 flow。舊 payload 沒有 degenerate 欄位時
+// 退回用「兩窗同格」近似（只抓得到 ts≥14:05，13:36~14:04 抓不到，故僅作相容用）。
+export function flowDegenerate(flow) {
+  if (!flow) return true;
+  if (flow.degenerate != null) return !!flow.degenerate;
+  const fr = flow.frames || {};
+  return !!(fr["10"] && fr["10"] === fr["30"]);
+}
+// 窗口內且 flow 可用才覆寫單一 key（冪等；TTL 7 天）
 export async function storeFlowLast(env, live, tp) {
   if (!env.FLOW_KV || !inFlowLastWindow(tp)) return { stored: false, reason: "窗口外" };
+  // 別把收盤殘影存成「定格」——會被 TTL 保留 7 天並當成正常定格顯示。
+  // 寫入窗 13:25–13:40 內短窗起點必 <13:30（要 ≥13:30 得 ts≥13:40 且該格存在），
+  // 正常不會命中；純防禦。
+  if (flowDegenerate(live && live.flow)) return { stored: false, reason: "flow 為 null 或收盤殘影" };
   const pl = flowLastPayload(live);
   if (!pl) return { stored: false, reason: "flow null" };
   await env.FLOW_KV.put(FLOW_LAST_KEY, JSON.stringify(pl), { expirationTtl: FLOW_LAST_TTL });
   return { stored: true, key: FLOW_LAST_KEY, date: pl.date };
 }
-// /live 附掛：flow=null 時 1 次 get；KV 讀失敗吞錯不影響 /live 主體
+// /live 附掛：flow 為 null 或收盤殘影時 1 次 get；KV 讀失敗吞錯不影響 /live 主體。
+// 注意閘門只看 degenerate，**不綁 subs、不綁 d30_yi 是否為 null**：開盤 09:10–09:30
+// 只有 10 分窗（d30_yi=null）但今日短窗資料完全有效，那時照樣附上 flow_last（成本一次
+// get），由前端各分頁自己決定要用即時還是定格——不同消費者需要的欄位不一樣。
 export async function attachFlowLast(env, live) {
-  if (!live || live.flow != null || !env.FLOW_KV) return live;
+  if (!live || !flowDegenerate(live.flow) || !env.FLOW_KV) return live;
   try {
     const fl = await env.FLOW_KV.get(FLOW_LAST_KEY, "json");
     if (fl) live.flow_last = fl;
@@ -2812,6 +2847,9 @@ export default {
     if (inFlowLastWindow(tp)) {
       ctx.waitUntil(buildLive(env)
         .then((live) => storeFlowLast(env, live, tp))
+        // 結果一定要 log：原本整個丟掉，守門若誤擋就會靜默失效，唯一症狀是前端永遠
+        // 顯示「盤中每分鐘累積後生效」——正是這個 bug 當初難被發現的同一個機制。
+        .then((r) => { if (r && !r.stored) console.log("flowLast 未寫入:", r.reason); })
         .catch((e) => console.log("flowLast:", e && e.message)));
     }
   },
