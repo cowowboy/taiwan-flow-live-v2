@@ -374,9 +374,16 @@ def render_card(card, F_B, F_R):
 
 # ---------------- 主流程 ----------------
 
+# Cloudflare 的 bot protection 會依 User-Agent 簽章擋掉 urllib 預設的 `Python-urllib/3.x`
+# ——回 HTTP 403 ＋ body `error code: 1010`（2026-07-31 定案：cards.yml #1/#2 兩次排程
+# 全掛在此，curl 與空 UA 都放行，只有 Python-urllib 被擋）。務必帶明確 UA。
+_UA = "taiwan-flow-live-v2-cards/1.0 (+https://github.com/shihpc/taiwan-flow-live-v2)"
+
+
 def fetch_cards(worker_base: str) -> dict:
     url = f"{worker_base.rstrip('/')}/cards/data"
-    with urllib.request.urlopen(url, timeout=60) as r:   # noqa: S310（固定 https base）
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=60) as r:   # noqa: S310（固定 https base）
         return json.loads(r.read().decode("utf-8"))
 
 
