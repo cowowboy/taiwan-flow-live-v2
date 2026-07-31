@@ -41,24 +41,24 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
     const crons = Object.entries(BACKUP_CRONS).filter(([, v]) => v === n).map(([k]) => k);
     chk(`${n} 恰兩條 cron（主＋recheck）`, crons.length === 2, crons.join(" | "));
   }
-  chk("recheck cron 命中 daysummary（台北 14:05）", backupPipelineForCron("5 6 * * 1-5", ENV)?.name === "daysummary");
-  chk("recheck cron 命中 intraday（台北 15:10）", backupPipelineForCron("10 7 * * 1-5", ENV)?.name === "intraday");
-  chk("recheck cron 命中 aetf（台北 19:00）", backupPipelineForCron("0 11 * * 1-5", ENV)?.name === "aetf");
-  chk("recheck cron 命中 baseline（台北 20:55）", backupPipelineForCron("55 12 * * 1-5", ENV)?.name === "baseline");
+  chk("recheck cron 命中 daysummary（台北 14:05）", backupPipelineForCron("5 6 * * 2-6", ENV)?.name === "daysummary");
+  chk("recheck cron 命中 intraday（台北 15:10）", backupPipelineForCron("10 7 * * 2-6", ENV)?.name === "intraday");
+  chk("recheck cron 命中 aetf（台北 19:00）", backupPipelineForCron("0 11 * * 2-6", ENV)?.name === "aetf");
+  chk("recheck cron 命中 baseline（台北 20:55）", backupPipelineForCron("55 12 * * 2-6", ENV)?.name === "baseline");
   chk("recheck cron 命中 us（台北 05:35，dow *）", backupPipelineForCron("35 21 * * *", ENV)?.name === "us");
   // cron 字串不得與既有任何一條重複（重複＝覆蓋掉別班的路由）
-  const all = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7,47 0-14,22-23 * * *", "*/5 13-15 * * 1-5",
+  const all = ["* 1-5 * * 2-6", "*/5 9-14 * * 2-6", "7,47 0-14,22-23 * * *", "*/5 13-15 * * 2-6",
     "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *", ...Object.keys(BACKUP_CRONS), ...Object.keys(HEALTH_CRONS)];
   chk("全部 cron 字串互不重複（含健檢班共 19 條）", new Set(all).size === all.length && all.length === 19, String(all.length));
-  chk("cron 命中 daysummary（主觸發 13:35）", backupPipelineForCron("35 5 * * 1-5", ENV)?.name === "daysummary");
-  chk("cron 命中 intraday（備援 14:40）", backupPipelineForCron("40 6 * * 1-5", ENV)?.name === "intraday");
-  chk("cron 命中 aetf（主觸發 18:35）", backupPipelineForCron("35 10 * * 1-5", ENV)?.name === "aetf");
-  chk("cron 命中 baseline（主觸發 20:05）", backupPipelineForCron("5 12 * * 1-5", ENV)?.name === "baseline");
-  chk("cron 命中 us（dow *，CF 拒收 0-4）", backupPipelineForCron("5 21 * * *", ENV)?.name === "us");
-  chk("舊 diag 備援 cron 已除役 → null", backupPipelineForCron("35 14 * * 1-5", ENV) === null);
-  chk("舊 mktbal 備援 cron 已除役 → null", backupPipelineForCron("45 14 * * 1-5", ENV) === null);
-  chk("既有 frame cron → null（不誤判備援）", backupPipelineForCron("* 1-5 * * 1-5", ENV) === null);
-  chk("既有哨兵 cron → null", backupPipelineForCron("*/5 9-14 * * 1-5", ENV) === null);
+  chk("cron 命中 daysummary（主觸發 13:35）", backupPipelineForCron("35 5 * * 2-6", ENV)?.name === "daysummary");
+  chk("cron 命中 intraday（備援 14:40）", backupPipelineForCron("40 6 * * 2-6", ENV)?.name === "intraday");
+  chk("cron 命中 aetf（主觸發 18:35）", backupPipelineForCron("35 10 * * 2-6", ENV)?.name === "aetf");
+  chk("cron 命中 baseline（主觸發 20:05）", backupPipelineForCron("5 12 * * 2-6", ENV)?.name === "baseline");
+  chk("cron 命中 us（dow *，跨日界改由程式守門）", backupPipelineForCron("5 21 * * *", ENV)?.name === "us");
+  chk("舊 diag 備援 cron 已除役 → null", backupPipelineForCron("35 14 * * 2-6", ENV) === null);
+  chk("舊 mktbal 備援 cron 已除役 → null", backupPipelineForCron("45 14 * * 2-6", ENV) === null);
+  chk("既有 frame cron → null（不誤判備援）", backupPipelineForCron("* 1-5 * * 2-6", ENV) === null);
+  chk("既有哨兵 cron → null", backupPipelineForCron("*/5 9-14 * * 2-6", ENV) === null);
   chk("既有新聞/晨報 cron → null", backupPipelineForCron("7,47 0-14,22-23 * * *", ENV) === null);
   chk("未知 cron → null", backupPipelineForCron("0 0 * * *", ENV) === null);
 }

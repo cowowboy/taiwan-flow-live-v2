@@ -612,7 +612,7 @@ export function taipeiParts(d = new Date()) {
 }
 // 這次 cron 醒來該做什麼（依台北時間＋觸發它的 cron 字串分流）：
 // - news：每天（含週末）06:07–22:07 每小時 :07 → dispatch taiwan-stock-news。
-//   例外：盤中 frame cron（* 1-5 * * 1-5）在 9:07–13:07 也會於 :07 醒來（兩條 cron
+//   例外：盤中 frame cron（* 1-5 * * 2-6）在 9:07–13:07 也會於 :07 醒來（兩條 cron
 //   同分重疊、各發一個 scheduled 事件），frame cron 醒來的那個要照存 frame，
 //   否則會重複 dispatch news 且掉一格分鐘 frame——所以用 event.cron 排除它。
 //   17:07–22:07 落在哨兵窗口內但 7 不是 %5==0（原本是 idle），改判 news 不衝突。
@@ -620,7 +620,7 @@ export function taipeiParts(d = new Date()) {
 //   收盤後留 ~1.5 小時給 FinMind 入庫。GitHub cron 06:00 保留當備援，冪等多跑無害）。
 // - sentinel：平日 17:00–22:59 台北每 5 分一輪盤後落地探測，其餘分鐘 idle。
 // - frame：其餘（實際上只有盤中 cron 會打到）。週六日永不進哨兵。
-export const FRAME_CRON = "* 1-5 * * 1-5";   // 需與 wrangler.toml crons[0] 完全一致
+export const FRAME_CRON = "* 1-5 * * 2-6";   // 需與 wrangler.toml crons[0] 完全一致
 export function scheduledRole(tp, cron) {
   if (tp.minute === 7 && tp.hour >= 6 && tp.hour <= 22 && cron !== FRAME_CRON)
     return "news";
@@ -778,26 +778,26 @@ export function backupPipelines(env) {
 // event.cron → 單體班 pipeline 名（cron 字串需與 wrangler.toml crons[] 完全一致）。
 // diag/mktbal 無專屬 cron（併入晚場協調班 runEvening 鏈式觸發）。
 export const BACKUP_CRONS = {
-  "35 5 * * 1-5":  "daysummary",   // 台北 13:35 主觸發（/live 13:30 收盤定格後即備；GH 備援 14:35）
-  "40 6 * * 1-5":  "intraday",     // 台北 14:40 備援（GH 主班 14:10 先跑先贏，缺檔才補發）
-  "35 10 * * 1-5": "aetf",         // 台北 18:35 主觸發（GH 備援 19:05；二段見 runEvening aetf2）
-  "5 12 * * 1-5":  "baseline",     // 台北 20:05 主觸發（法人官方 20:00＋腳本自帶 10 分×4 重試；GH 備援 21:15）
-  // us 主觸發 05:05 台北 = 21:05 UTC 前一日；CF cron 拒收 dow 0-4（code 10100），改用 dow *、
+  "35 5 * * 2-6":  "daysummary",   // 台北 13:35 主觸發（/live 13:30 收盤定格後即備；GH 備援 14:35）
+  "40 6 * * 2-6":  "intraday",     // 台北 14:40 備援（GH 主班 14:10 先跑先贏，缺檔才補發）
+  "35 10 * * 2-6": "aetf",         // 台北 18:35 主觸發（GH 備援 19:05；二段見 runEvening aetf2）
+  "5 12 * * 2-6":  "baseline",     // 台北 20:05 主觸發（法人官方 20:00＋腳本自帶 10 分×4 重試；GH 備援 21:15）
+  // us 主觸發 05:05 台北 = 21:05 UTC 前一日；此班跨台北日界、dow 無法直接表達（且 CF cron dow 為 Quartz 慣例 1-7＝日~六，非 POSIX），改用 dow *、
   // 週末守門移到 runBackup 內用台北 dow（21:05 UTC 只在台北一~五晨落在平日）：
   "5 21 * * *":    "us",           // 台北 05:05 主觸發（GH 備援 06:10）；weekend 由 runBackup dow 守門
   // recheck 班（2026-07-25）：主觸發後 T+25~50 分再看一次產物。首發的 GH run 若自己失敗，
   // 舊版靠 bkfired 短路等於當日不再管；現在 bkGate 冷卻期過→產物仍非今日就補發第 2 次並告警。
   // 時點都排在該班 GH 兜底 cron 之前（補發還來得及，來不及才輪到 GH）。
-  "5 6 * * 1-5":   "daysummary",   // 台北 14:05（首發 13:35＋30 分；GH 兜底 14:35）
-  "10 7 * * 1-5":  "intraday",     // 台北 15:10（首發 14:40＋30 分）
-  "0 11 * * 1-5":  "aetf",         // 台北 19:00（首發 18:35＋25 分；GH 兜底 19:05）
-  "55 12 * * 1-5": "baseline",     // 台北 20:55（首發 20:05＋50 分——baseline 腳本自帶 10 分×4 重試，
+  "5 6 * * 2-6":   "daysummary",   // 台北 14:05（首發 13:35＋30 分；GH 兜底 14:35）
+  "10 7 * * 2-6":  "intraday",     // 台北 15:10（首發 14:40＋30 分）
+  "0 11 * * 2-6":  "aetf",         // 台北 19:00（首發 18:35＋25 分；GH 兜底 19:05）
+  "55 12 * * 2-6": "baseline",     // 台北 20:55（首發 20:05＋50 分——baseline 腳本自帶 10 分×4 重試，
                                    //   等它跑完才判失敗，否則誤判重發；GH 兜底 21:15）
   "35 21 * * *":   "us",           // 台北 05:35（首發 05:05＋30 分；GH 兜底 06:10）；weekend 同樣由 dow 守門
 };
 // 非單體班的排程角色（cron 字串 → 角色；晚場協調班／am summary 輪詢窗）
 export const DISPATCH_ROLES = {
-  "*/5 13-15 * * 1-5": "evening",      // 台北 21:00–23:55 每 5 分：pm summary→diag 鏈→mktbal 鏈→aetf2
+  "*/5 13-15 * * 2-6": "evening",      // 台北 21:00–23:55 每 5 分：pm summary→diag 鏈→mktbal 鏈→aetf2
   "50,55 22 * * *":    "summary-am",   // 台北 06:50/06:55 起手（dow 程式守門）
   "*/5 23 * * *":      "summary-am",   // 台北 07:00–07:55 主窗（morning 常態 07:1x 落地）
   "*/10 0 * * *":      "summary-am",   // 台北 08:00–08:50 尾窗兜底（morning 遲到仍趕 09:00 前）
@@ -806,8 +806,8 @@ export const DISPATCH_ROLES = {
 // 補的是 recheck 之後的最後一個洞：達 BK_MAX_ATTEMPTS 上限、或某條管線根本不在 Worker 管轄
 // （flows/postmkt/news 走哨兵事件驅動、summary 走事件驅動）時，失敗一樣沒人知道。
 export const HEALTH_CRONS = {
-  "50 15 * * 1-5": "eve",    // 台北 23:50——晚場協調班窗（-23:55）尾聲，所有 GH 兜底 cron（-22:55）也都過了
-  "30 1 * * 1-5":  "morn",   // 台北 09:30——morning/us/summary-am 全部窗口（-08:50）之後
+  "50 15 * * 2-6": "eve",    // 台北 23:50——晚場協調班窗（-23:55）尾聲，所有 GH 兜底 cron（-22:55）也都過了
+  "30 1 * * 2-6":  "morn",   // 台北 09:30——morning/us/summary-am 全部窗口（-08:50）之後
 };
 // 統一路由（scheduled handler 最先判，先於 scheduledRole——晚場/am 窗的台北時刻落在
 // 哨兵窗（17-23 時 %5 分）與 :47/:07 分流範圍，不先攔截會誤入 sentinel/news/idle）
@@ -883,7 +883,7 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
     const series = env.FLOW_KV ? await env.FLOW_KV.get(`series:${today}`, "json") : null;
     if (!series || !series.length) return { name: pipe.name, skipped: "non-trading-day" };
   } else if (tp.dow != null && (tp.dow < 1 || tp.dow > 5)) {
-    // us（美股班）：cron 用 dow *（CF 拒收 0-4），週末守門改在此用台北 dow——21:30 UTC 只在
+    // us（美股班）：cron 用 dow *（跨台北日界；CF dow 為 Quartz 1-7＝日~六），週末守門改在此用台北 dow——21:30 UTC 只在
     // 台北一~五晨落平日；台北六/日晨（UTC 五/六）不補發，避免週末對無新資料的 us.yml 空轉補發
     return { name: pipe.name, skipped: "non-trading-day" };
   }

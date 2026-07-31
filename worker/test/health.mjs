@@ -84,11 +84,11 @@ const mkFetch = (freshNames, alerts = []) => async (u, init) => {
 // ---- cron 路由 ----
 {
   chk("HEALTH_CRONS 兩條", Object.keys(HEALTH_CRONS).length === 2);
-  chk("台北 23:50 → eve", dispatchRoleForCron("50 15 * * 1-5")?.kind === "health" && dispatchRoleForCron("50 15 * * 1-5").slot === "eve");
-  chk("台北 09:30 → morn", dispatchRoleForCron("30 1 * * 1-5")?.slot === "morn");
-  chk("健檢 cron 不與備援班撞", dispatchRoleForCron("50 15 * * 1-5").name === undefined);
-  chk("既有晚場班 cron 仍回 evening", dispatchRoleForCron("*/5 13-15 * * 1-5")?.kind === "evening");
-  chk("既有 recheck cron 仍回 backup", dispatchRoleForCron("55 12 * * 1-5")?.kind === "backup");
+  chk("台北 23:50 → eve", dispatchRoleForCron("50 15 * * 2-6")?.kind === "health" && dispatchRoleForCron("50 15 * * 2-6").slot === "eve");
+  chk("台北 09:30 → morn", dispatchRoleForCron("30 1 * * 2-6")?.slot === "morn");
+  chk("健檢 cron 不與備援班撞", dispatchRoleForCron("50 15 * * 2-6").name === undefined);
+  chk("既有晚場班 cron 仍回 evening", dispatchRoleForCron("*/5 13-15 * * 2-6")?.kind === "evening");
+  chk("既有 recheck cron 仍回 backup", dispatchRoleForCron("55 12 * * 2-6")?.kind === "backup");
   chk("未知 cron → null", dispatchRoleForCron("0 0 * * *") === null);
 }
 

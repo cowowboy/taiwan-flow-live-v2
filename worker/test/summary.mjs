@@ -23,21 +23,21 @@ const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-f
 // ---- cron 路由：12 條 cron 唯一歸屬、互不衝突 ----
 {
   // wrangler.toml 全部 12 條（需與檔案完全一致）
-  const ALL = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7,47 0-14,22-23 * * *",
-    "35 5 * * 1-5", "40 6 * * 1-5", "35 10 * * 1-5", "5 12 * * 1-5",
-    "*/5 13-15 * * 1-5", "5 21 * * *", "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *"];
+  const ALL = ["* 1-5 * * 2-6", "*/5 9-14 * * 2-6", "7,47 0-14,22-23 * * *",
+    "35 5 * * 2-6", "40 6 * * 2-6", "35 10 * * 2-6", "5 12 * * 2-6",
+    "*/5 13-15 * * 2-6", "5 21 * * *", "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *"];
   chk("12 條 cron 無重複字串", new Set(ALL).size === 12);
   // 前三條（frame/哨兵/news+morning）不得被 dispatchRoleForCron 攔截
-  chk("frame cron 不被攔截", dispatchRoleForCron("* 1-5 * * 1-5") === null);
-  chk("哨兵 cron 不被攔截", dispatchRoleForCron("*/5 9-14 * * 1-5") === null);
+  chk("frame cron 不被攔截", dispatchRoleForCron("* 1-5 * * 2-6") === null);
+  chk("哨兵 cron 不被攔截", dispatchRoleForCron("*/5 9-14 * * 2-6") === null);
   chk("news/morning cron 不被攔截", dispatchRoleForCron("7,47 0-14,22-23 * * *") === null);
   // 後九條必須各有唯一角色
-  chk("daysummary → backup", dispatchRoleForCron("35 5 * * 1-5")?.kind === "backup");
-  chk("intraday → backup", dispatchRoleForCron("40 6 * * 1-5")?.kind === "backup");
-  chk("aetf → backup", dispatchRoleForCron("35 10 * * 1-5")?.kind === "backup");
-  chk("baseline → backup", dispatchRoleForCron("5 12 * * 1-5")?.kind === "backup");
+  chk("daysummary → backup", dispatchRoleForCron("35 5 * * 2-6")?.kind === "backup");
+  chk("intraday → backup", dispatchRoleForCron("40 6 * * 2-6")?.kind === "backup");
+  chk("aetf → backup", dispatchRoleForCron("35 10 * * 2-6")?.kind === "backup");
+  chk("baseline → backup", dispatchRoleForCron("5 12 * * 2-6")?.kind === "backup");
   chk("us → backup", dispatchRoleForCron("5 21 * * *")?.kind === "backup");
-  chk("晚場協調班 → evening", dispatchRoleForCron("*/5 13-15 * * 1-5")?.kind === "evening");
+  chk("晚場協調班 → evening", dispatchRoleForCron("*/5 13-15 * * 2-6")?.kind === "evening");
   chk("am 起手 → summary-am", dispatchRoleForCron("50,55 22 * * *")?.kind === "summary-am");
   chk("am 主窗 → summary-am", dispatchRoleForCron("*/5 23 * * *")?.kind === "summary-am");
   chk("am 尾窗 → summary-am", dispatchRoleForCron("*/10 0 * * *")?.kind === "summary-am");

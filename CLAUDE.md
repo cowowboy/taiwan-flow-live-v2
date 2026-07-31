@@ -49,9 +49,9 @@
 
 程式在 `worker/src/index.js` 的 `runSentinel`（:654-675），設計說明 :547-558。
 
-- **cron**：`"*/5 9-14 * * 1-5"`（`worker/wrangler.toml:35`）＝ UTC 09:00–14:55
+- **cron**：`"*/5 9-14 * * 2-6"`（`worker/wrangler.toml:40`；**dow 為 Quartz 慣例，2-6＝週一~五**）＝ UTC 09:00–14:55
   ＝ **台北 17:00–22:55、週一至五、每 5 分**。程式端二次守門 `scheduledRole`
-  （:597-599）：`weekday && hour>=17 && hour<23 && minute%5===0` 才回 `sentinel`。
+  （:632）：`weekday && hour>=17 && hour<23 && minute%5===0` 才回 `sentinel`。
 - **探測法**（`probeSignal` :645-653）：對每個未完成訊號打 FinMind
   `dataset=<X>&data_id=2330&start_date=end_date=今日`（最便宜的請求，不掛 cf 快取）。
 - **落地判定** `signalLanded()`（:603-607）：今日資料非空即算落地；`daytrade` 另要求

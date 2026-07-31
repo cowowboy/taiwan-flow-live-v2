@@ -1,10 +1,47 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-25（排程可靠度補強 P0+P1：bkGate recheck、失敗告警、日終/晨間健檢、jobstat 軌跡）
+最後更新：2026-07-31（**週五全線靜默事故定案**：CF cron dow 用 Quartz 慣例，13 條 `1-5` 實為週日~週四）
 
 ## 快速接手
 
-- **⚠️ 未解問題：2026-07-24（週五）盤中 frame 班整天沒落格**（2026-07-25 盤點 KV 時發現）。
+- **🔴 待部署驗收：CF cron dow 慣例錯誤，13 條 cron 星期五全不觸發、星期日誤觸發**
+  （2026-07-31 定案；程式已改、**尚未 deploy**）。
+  **根因**：Cloudflare cron 的 dow 欄位是 **Quartz 慣例 1-7 = 日一二三四五六**，不是 POSIX 的 0-6。
+  `worker/wrangler.toml` 13 條寫 `... * * 1-5` 的班，實際生效區間是**週日~週四**——
+  **星期五整天不觸發，星期日反而全跑一遍**。
+  **實證**：① 檔案存在率 07-20~07-23（一~四）4/4、**07-24（五）缺**；07-27~07-30 4/4、**07-31（五）缺**；
+  一~四 8/8 成功、五 0/2。② `data/intraday/2026-07-26.json` 存在，**那是星期日**——commit 時間
+  UTC 06:40 ＝台北週日 14:40，正是 `wrangler.toml` 的 `"40 6 * * 1-5"`（GH 的 `intraday.yml` 用 POSIX、
+  週日不跑，只有 Worker 發得出來）；該檔 series 276 筆但 `first{09:00, amt:27552.2, idx:43654.84}`
+  與 `last{13:35, …}` **完全相同**（休市凍結快照），對照 07-30 為 3066.9→35912.1 正常成長。
+  ③ commit `527c0c0`（2026-07-20）message 記載首發被 CF 回 400
+  `invalid cron string: 30 21 * * 0-4`——POSIX 合法的 `0` 被拒，證明 dow 下限是 1。
+  **當時誤讀為「CF 拒收 dow 0」**，遂把 `1-5` 當平日用，bug 自 commit `00666ec` 第一天就存在。
+  **連鎖**：frame 班週五不醒 → `storeFrame`（`worker/src/index.js:249`）/`appendSeries`（`:318-331`）沒被呼叫
+  → `series:<週五>` 不存在 → `/health` 回 `noSeries:true` → 所有 TW 班被 non-trading-day 守門擋掉
+  （`/backup?name=*` 與 `/evening` 實測全回 `skipped:"non-trading-day"`）；GH `intraday.yml` 週五
+  有跑但 KV 無 frame，`src/archive_intraday.py:115-116` 優雅退出不寫檔 → JSON 404。
+  **哨兵 `"*/5 9-14 * * 1-5"` 週五同樣不醒 → flows/postmkt 從未被 dispatch**——哨兵不看 series，
+  這證明故障點在 **cron 層**而非 series 守門層（2026-07-25 當時的推測方向偏下游一層）。
+  晚場協調班週五不醒 → summary-pm 無檔、diag→mktbal 鏈不啟動。daysummary/aetf 週五靠 GH 兜底落地。
+  交叉驗證：`/jobs?date=20260731` 只有 3 筆、最後一筆停在台北 06:50（dow `*` 的班），
+  而晨間健檢 `"30 1 * * 1-5"`（台北 09:30）若有跑，`runHealthCheck` 結尾無條件 `recordJob`
+  （`worker/src/index.js:1209`）必留一筆 `health-morn`——沒有，證明它週五沒被叫起來。
+  **已排除**：`taipeiParts()`（:608）UTC+8 換算正確；程式內 `tp.dow >= 1 && tp.dow <= 5`
+  守門（:517、:627、:632）用 JS `getDay` 慣例（0=日），判台北週一~五**正確無誤**。
+  真正的坑是**同一個字面量 `1-5`，JS 裡是週一~五、CF cron 裡是週日~週四**。
+  **修法（已改，未部署）**：13 條 dow `1-5` → `2-6`，並同步 `worker/src/index.js` 的 `FRAME_CRON`
+  ＋`BACKUP_CRONS`／`DISPATCH_ROLES` 等 12 處字面量 key、`worker/test/*.mjs` 28 處，共 53 處。
+  跨日界而寫 dow `*`＋程式守門的班（us／summary-am）**刻意不動**。本機測試 17 支全綠（0 失敗）。
+  **下一步**：① `cd worker && npx wrangler deploy`（需 Cloudflare 認證）；
+  ② **08-02（週日）驗不再誤觸發**——當日不應產生 `data/intraday/2026-08-02.json`、
+  `/jobs?date=20260802` 不應出現 TW 班事件；③ **08-07（週五）驗會觸發**——
+  `/health` 不再回 `noSeries`、`data/intraday/2026-08-07.json` 應存在且 series 有成長。
+  **善後**：`data/intraday/2026-07-26.json` 是本 bug 產生的週日休市死資料，**正在污染回測樣本，建議刪**；
+  07-24 與 07-31 兩個交易日的 frame 樣本已永久遺失（KV frame TTL 2 天），無法補。
+  07-31 當日 flows/postmkt/diag/mktbal/baseline/summary-pm 需手動 workflow_dispatch 補跑。
+
+- **（已定案，保留原始紀錄）2026-07-24（週五）盤中 frame 班整天沒落格**（2026-07-25 盤點 KV 時發現）。
   證據：KV namespace 全部只剩 4 個 key（`alerts:cfg`／`flow:last`／`usw:*`／`bkfired:20260724:us`），
   **沒有任何 `f:`／`fi:`／`series:`／`sentinel:` key**（TTL 2 天，07-24 的應該都還在）；
   `data/intraday/2026-07-24.json` 404（該日回測樣本已永久遺失，frame TTL 過期無法補）。
@@ -14,9 +51,12 @@
   **已排除**：FinMind token、KV 寫入、storeFrame 本身——07-25 手動打 `/snap?force=1` 成功寫入
   `f:2026-07-25:22:51`（2805 檔）；news 班（cron `7,47 …`）07-25 22:07 仍正常 dispatch，
   代表 scheduled handler 有在跑。**未確認**：`* 1-5 * * 1-5` 這條 cron 07-24 到底有沒有被觸發
-  （原本沒開 Workers Logs，事後查不到）。**下一步**：已開 `[observability]`，下個交易日
-  （2026-07-27 週一）09:00 後跑 `npx wrangler tail` 或看 dashboard invocation，確認該 cron 有無觸發；
-  同時 09:30 晨間健檢與 23:50 日終健檢會主動叫（若再發生，這次不會再靜默一整天）。
+  （原本沒開 Workers Logs，事後查不到）。
+  ~~下一步：2026-07-27 週一 09:00 後跑 `npx wrangler tail` 確認該 cron 有無觸發。~~
+  **⚠️ 這個下一步方向錯誤、且注定驗不出東西——週一本來就是好的**（dow `1-5` ＝ 週日~週四）。
+  結論見上方「CF cron dow 慣例錯誤」段：該 cron 07-24 確實沒被觸發，因為星期五不在其生效區間。
+  **教訓**：只有一天的樣本就當偶發事故查根因，漏看「同一現象是否有週期性」；
+  2026-07-31 改掃連續三週的產物存在率，規律（一~四 8/8、五 0/2）一眼就出來了。
 
 - **健檢＋狀態軌跡（2026-07-25 P1，deploy version `fcac14fd`）**：
   ① **日終 23:50／晨間 09:30 健檢班**（CF cron 17→19 條）：不 dispatch、不補跑，只盤點當日該有的
@@ -107,7 +147,8 @@
     us 05:30（本 repo，美股班）；diag 22:35、mktbal 22:45（**跨 repo → postmkt**）。
   - **機制**：①產物新鮮度（不需 GH token，直接量資料有沒有更新；us 因 date 欄是美股交易日會落後，
     改判 `generated_at` 是否今天跑過）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
-    失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 runBackup 內台北 dow 守週末——CF cron 拒收 dow 0-4 code 10100，us cron 改用 dow *）
+    失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 runBackup 內台北 dow 守週末——us 班跨台北日界，dow 無法直接表達，cron 改用 dow *；
+    CF cron dow 為 Quartz 慣例 1-7＝日~六，平日應寫 2-6，見上方「CF cron dow 慣例錯誤」段）
     ④`GH_DISPATCH_TOKEN` 未設整段靜默。程式：`worker/src/index.js` `backupPipelines`/`BACKUP_CRONS`/
     `backupPipelineForCron`/`runBackup`（`dispatchMorning` 之後）；`scheduled` 入口最先判 `backupPipelineForCron`。
   - **cron**：`wrangler.toml` 新增 6 條專屬 cron（3→9 條；Paid 上限 250）。與哨兵 cron 同分觸發時各帶
