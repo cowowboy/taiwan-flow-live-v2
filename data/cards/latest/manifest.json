@@ -1,24 +1,22 @@
 {
- "date": "2026-08-03",
- "generated_at": "2026-08-04T00:37:19+08:00",
+ "date": "2026-08-04",
+ "generated_at": "2026-08-05T00:20:26+08:00",
  "images": {
-  "sig-exit-sell": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-exit-sell.png?d=2026-08-03",
-  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-03",
-  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-03",
-  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-03",
-  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-03",
-  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-03",
-  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-03",
-  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-03"
+  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-04",
+  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-04",
+  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-04",
+  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-04",
+  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-04",
+  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-04",
+  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-04"
  },
  "ratios": {
-  "sig-exit-sell": "1024:366",
   "v2-ov-1": "1024:643",
   "v2-ov-6": "1020:1024",
   "flows-hdr-1": "1024:643",
   "flows-hdr-2": "1024:437",
   "flows-foreign-1": "861:1024",
   "flows-trust-1": "861:1024",
-  "pm-aetf-5": "1024:488"
+  "pm-aetf-5": "1024:539"
  }
 }
