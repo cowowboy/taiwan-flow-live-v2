@@ -373,6 +373,10 @@ def render_paras(card, F_B, F_R):
 # 長文版型：內文左對齊 Regular（render_paras 是 34px 粗體置中，為一兩段短句設計，
 # 2000 字那樣排不可讀）；`##` 段標粗體拉層次。畫布高度隨內容長，不縮放。
 LF_BODY, LF_HEAD, LF_LH, LF_GAP = 34, 40, 52, 22
+# markdown 標記清理（圖上不該出現 ** 、* 、--- 這些原始標記）
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+?)\*(?!\*)")
+_MD_RULE_RE = re.compile(r"^\s*([-*_])\s*(\1\s*){2,}$")
 
 
 def render_longform(card, F_B, F_R):
@@ -385,13 +389,17 @@ def render_longform(card, F_B, F_R):
     laid = []                                   # (font|None, line, is_head)；None＝段距
     for raw in [str(x) for x in (card.get("paras") or [])]:
         line = raw.strip()
-        if not line:
+        if not line or _MD_RULE_RE.match(line):     # 空行與 --- 分隔線不入版
             continue
         is_head = line.startswith("#")
         if is_head:
             line = line.lstrip("#").strip()
-        else:
-            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)   # 去掉 markdown 粗體標記
+        # 標記一律去除（不分標題/內文）：標題行原本漏掉，導致 `**4/6**`、`*斜體*`
+        # 直接印在圖上（2026-08-07 驗收發現，真實資料 78 行中 11 行受影響）
+        line = _MD_BOLD_RE.sub(r"\1", line)
+        line = _MD_ITALIC_RE.sub(r"\1", line)
+        if not line:
+            continue
         f = f_head if is_head else f_body
         for ln in wrap_text(probe, line, f, maxw):
             laid.append((f, ln, is_head))
