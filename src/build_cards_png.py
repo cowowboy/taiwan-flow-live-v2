@@ -375,6 +375,8 @@ def render_paras(card, F_B, F_R):
 LF_BODY, LF_HEAD, LF_LH, LF_GAP = 34, 40, 52, 22
 # markdown 標記清理（圖上不該出現 ** 、* 、--- 這些原始標記）
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+# 斜體只吃**成對**的單星號：台股代號後綴會用單一 `*`（如「2327 國巨*」＝其他交易條件註記），
+# 貪吃會把真實內容吃掉。實測 2026-08-06 摘要，該行正確保留。
 _MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+?)\*(?!\*)")
 _MD_RULE_RE = re.compile(r"^\s*([-*_])\s*(\1\s*){2,}$")
 
