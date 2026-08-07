@@ -4,6 +4,15 @@
 
 ## 快速接手
 
+- **盤後分析摘要長文卡上線（2026-08-07）**：`pm-summary-1`，走**獨立 LINE Image message**
+  （官方 2020-05 起像素無上限），不進 Flex carousel——2000 字塞進 1024×1024 有效字級只剩
+  7.5px。Worker `fxCardSummaryLongform` 讀 postmkt `data/summary/<date>-pm.json`，
+  Python `render_longform` 渲染 1040×4812／292KB ＋ 1040×1040 預覽。
+  **同時修掉一顆地雷**：`build_cards_png.py` 的 `MAX_PNG_BYTES` 原本用 `raise SystemExit`，
+  單卡超標會炸掉整個 render step → commit 不執行 → manifest 停在昨日 → 當晚**全部**卡退純文字；
+  改成逐卡跳過。**待線上驗收**：08-07（五）22:12 渲染、22:30 推播，實機看 bubble 呈現
+  （官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
+
 - **🔴 待部署驗收：CF cron dow 慣例錯誤，13 條 cron 星期五全不觸發、星期日誤觸發**
   （2026-07-31 定案；程式已改、**尚未 deploy**）。
   **根因**：Cloudflare cron 的 dow 欄位是 **Quartz 慣例 1-7 = 日一二三四五六**，不是 POSIX 的 0-6。

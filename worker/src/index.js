@@ -1329,6 +1329,27 @@ export const FX_COLORS = { up: "#D5342F", down: "#12855A", neutral: "#8A8F93", m
 // 誤殺面太大（「外資關注度」等中性句），pm-aetf-1 解鎖時另以卡別專屬檢查處理其文案。
 export const FX_FORBIDDEN = ["第1名", "第一名", "Top1", "TOP1", "Top 1", "TOP 1", "最強", "最弱",
   "必漲", "必跌", "該買", "該賣", "買進", "賣出", "建議關注", "值得關注", "訊號明確", "看多", "看空"];
+// 長文摘要卡（2026-08-07）：走**獨立 Image message**，不進 Flex carousel——
+// 全文約 2000 字，Flex hero 的 1024×1024 與 3:1 aspectRatio 都塞不下（實測縮完
+// 有效字級 7.5px 不可讀）。故不列入 FX_ACTIVE_CARDS，另由 FX_LONGFORM_CARD 走專用管道。
+export const FX_LONGFORM_CARD = "pm-summary-1";
+// 禁用字中性化：比照既有 fxSanitize 的精神——命中就換成描述性中性詞，而非整張剔除。
+// LLM 生成的 2000 字踩中黑名單的機率遠高於人工短文案，整張丟等於該卡常態消失。
+// 換完仍交給 assertCardAllowed 當最後防線（使用者 2026-08-07 定案：禁用字排除照樣適用）。
+export const FX_NEUTRALIZE = {
+  "最強": "最大", "最弱": "最小", "第一名": "居首", "第1名": "居首", "Top1": "居首",
+  "TOP1": "居首", "Top 1": "居首", "TOP 1": "居首", "必漲": "偏強", "必跌": "偏弱",
+  "該買": "偏多", "該賣": "偏空", "買進": "偏多", "賣出": "偏空",
+  "看多": "偏多解讀", "看空": "偏空解讀", "建議關注": "可留意", "值得關注": "可留意",
+  "訊號明確": "訊號清楚",
+};
+export function fxNeutralize(text) {
+  let t = String(text || "");
+  for (const w of Object.keys(FX_NEUTRALIZE).sort((a, b) => b.length - a.length)) {
+    t = t.split(w).join(FX_NEUTRALIZE[w]);
+  }
+  return t;
+}
 // C 類訊號卡白名單守門（規格 3B.3/6）：回測結論產出前不得上線。
 // 解鎖條件：alpha sweep AS-01~04 通過（前四張）；pm-aetf-1 另需文案改寫完成。
 export const FX_BLOCKED_CARDS = new Set(
@@ -1887,6 +1908,7 @@ export const FX_CARD_BUILDERS = [
   ["pm-lending-3", (s) => fxCardLending(s, "plat_total", "券商借券餘額排行", "兩平台借券餘額")],
   ["pm-lending-4", (s) => fxCardLending(s, "sbl_short_bal", "借賣餘額排行", "借賣餘額")],
   ["pm-lending-6", (s) => fxCardLending(s, "margin_bal", "融資餘額排行", "融資餘額")],
+  ["pm-summary-1", fxCardSummaryLongform],
 ];
 // 2026-07-30 內容裁剪（使用者授權以投資人角度評選）：39→11 張，判準＝
 // 「不開網站也想送到眼前、會影響明天的決定、更新頻率配得上每日推播」。
@@ -1899,6 +1921,34 @@ export const FX_ACTIVE_CARDS = new Set([
   "sig-sub-surge", "sig-dual-buy",            // 卡1 次產業湧入、卡2 土洋同買
   "sig-exit-sell", "sig-surge-warn",          // 卡5 退出＋法人賣、卡6 追高警示
 ]);
+// 盤後分析摘要長文卡：postmkt data/summary/<date>-pm.json 的 synthesis 全文。
+// 使用者 2026-08-07 定案採「保留全文＋改免責句」（另兩案為改 prompt／只取綜合研判節）：
+// 本卡明標 AI 生成、內含方向判斷與假設性進出情境，與其餘卡片「僅描述歷史統計傾向」不同。
+export function fxCardSummaryLongform(s) {
+  const j = s.summaryPm;
+  const text = j && j.synthesis && j.synthesis.text;
+  if (!text) return { skip: "summary-pm 未就緒" };
+  const dataDate = s.baseline && s.baseline.date ? String(s.baseline.date).slice(0, 10) : null;
+  const sumDate = j.date ? String(j.date).slice(0, 10) : null;
+  // 摘要日與卡片資料日必須一致，否則會把昨日分析標成今日（同 attachCardImages 的守門精神）。
+  // dataDate 缺（baseline 沒抓到）也一律 skip——沒有可信資料日就無從核對摘要是不是當日的，
+  // 與 buildCardsData「baseline 缺 → date:null → Python 拒渲染」同一套保守立場。
+  if (!sumDate || !dataDate || sumDate !== dataDate) {
+    return { skip: `summary 日期不符（summary=${sumDate} data=${dataDate}）` };
+  }
+  const paras = fxNeutralize(text).split("\n").map((x) => x.trim()).filter(Boolean);
+  if (!paras.length) return { skip: "summary 內容為空" };
+  return {
+    kind: "longform",
+    title: "盤後分析摘要",
+    sub: `AI 生成 · 資料日 ${sumDate}`,
+    paras,
+    note: "與本站其他圖卡不同：其餘卡片僅描述歷史統計傾向，本卡含推測性內容。"
+        + "僅供參考，非投資建議，據以操作風險自負。",
+    disclaimer: "本卡由 AI 依當日資料彙整，內含方向判斷與假設性進出情境，未經回測驗證",
+  };
+}
+
 export function buildDailyCards(src) {
   const s = src || {};
   // ctx 三件各自帶保底：任何一件建構失敗只降級該件（names 空 Map／regime 未判定／
@@ -1949,6 +1999,7 @@ export function cardSourceUrls(env, dateISO) {
     flowsDaily:     `${FLOWS_RAW_BASE}/data/daily/${dateISO.replaceAll("-", "")}.json`,
     postmkt:        `${POSTMKT_BASE}/data/postmkt.json`,
     mktbal:         `${POSTMKT_BASE}/data/market_balance_history.json`,
+    summaryPm:      `${POSTMKT_BASE}/data/summary/${dateISO.replaceAll("-", "")}-pm.json`,
     manifest:       `${V2}/cards/latest/manifest.json`,
   };
 }
@@ -1980,7 +2031,8 @@ export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
   const built = buildDailyCards(src);
   const cards = [];
   for (const c of built.cards) {
-    if (!FX_ACTIVE_CARDS.has(c.id)) continue;
+    // 長文卡不在 FX_ACTIVE_CARDS（不進 carousel），但要出現在 /cards/data 讓 Python 渲染
+    if (!FX_ACTIVE_CARDS.has(c.id) && c.id !== FX_LONGFORM_CARD) continue;
     try { assertCardAllowed(c); cards.push(c); }
     catch (e) { console.log("cards/data 過濾剔除:", c.id, e && e.message); }
   }
@@ -2012,6 +2064,18 @@ export function attachCardImages(cards, manifest, dateISO) {
 // baseline 交易日守門 → 組卡＋assertCardAllowed 縱深過濾 → 0 卡記 skip →
 // LINE Flex（失敗退純文字）＋ webhook（固定純文字）→ 任一通道成功才寫 KV。
 // 全通道失敗 → 拋錯（不寫 KV，下輪自動重試；接線層負責 alertJob 告警）。
+// 長文圖取用守門：manifest 當日、原圖與預覽都在、都是 https。任一不成立回 null＝
+// 當晚沒有長文圖（Flex carousel 完全不受影響——長文是純附加）。
+export function longformImage(manifest, dateISO) {
+  const m = manifest || {};
+  if (String(m.date || "") !== dateISO) return null;
+  const url = (m.images || {})[FX_LONGFORM_CARD];
+  const preview = (m.previews || {})[FX_LONGFORM_CARD];
+  if (typeof url !== "string" || !url.startsWith("https://")) return null;
+  if (typeof preview !== "string" || !preview.startsWith("https://")) return null;
+  return { url, preview };
+}
+
 export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   // ① 時間守門：evening 班 21:00 起每 5 分醒，22:30 前一律不動作（零 fetch 零 KV 讀）
   if (tp.hour * 60 + tp.minute < CARDS_PUSH_AFTER_MIN) return { name: "cards", waiting: "before-22:30" };
@@ -2031,20 +2095,27 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   //    一次——過不了的整張剔除記 log，不擋其他卡（規格 9.3 發送層驗收條件）
   const built = buildDailyCards(src);
   const cards = [], dropped = [];
+  let hasLongform = false;
   for (const c of built.cards) {
-    if (!FX_ACTIVE_CARDS.has(c.id)) continue;   // 內容裁剪白名單（spec 3C）
-    try { assertCardAllowed(c); cards.push(c); }
-    catch (e) {
+    const isLf = c.id === FX_LONGFORM_CARD;
+    if (!FX_ACTIVE_CARDS.has(c.id) && !isLf) continue;   // 內容裁剪白名單（spec 3C）
+    try {
+      assertCardAllowed(c);                    // 長文卡同樣過守門（文字在 card.paras，看得到）
+      if (isLf) hasLongform = true; else cards.push(c);
+    } catch (e) {
       dropped.push({ id: c.id, reason: String((e && e.message) || e) });
       console.log("cards 預過濾剔除:", c.id, e && e.message);
     }
   }
+  // 長文圖：卡文字過了守門、且 manifest 有當日渲染結果，才附加
+  const lf = hasLongform ? longformImage(src.manifest, tp.date) : null;
   // ⑤b PNG hero（spec 3C）：manifest 當日才掛圖，非當日／缺檔＝0 張掛圖＝整批文字版。
   //    只影響 Flex 版型（cardBubble 對有 img 卡出 hero）；fallback 純文字不受影響——
   //    卡物件保留 rows/paras 原資料，數字版內容兩條路徑一致。
   const imgs = attachCardImages(cards, src.manifest, tp.date);
   if (opts.dry) return { name: "cards", wouldPush: cards.length,
-    skippedCards: built.skipped.length, dropped: dropped.length, imgs };
+    skippedCards: built.skipped.length, dropped: dropped.length, imgs,
+    longform: lf ? "attached" : (hasLongform ? "no-image" : "no-card") };
   // ⑥ 0 卡不推：寫 KV 記 skip 後短路（0 卡之夜後續喚醒不再白抓 13 支）
   if (!cards.length) {
     if (env.FLOW_KV) await env.FLOW_KV.put(key, "skip-empty", { expirationTtl: ALERTED_TTL });
@@ -2065,6 +2136,12 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
       messages.forEach((m, i) => {   // altText 帶序號：盤後圖卡 N/M（任務 4g）
         m.altText = `股市雷達 盤後圖卡 ${i + 1}/${messages.length}｜${tp.date}`.slice(0, 1500);
       });
+      // 長文摘要走獨立 image message（不算多一則計費：官方計費按收訊人數，
+      // 非 request 內 message 物件數 —— messaging-api/pricing #how-to-count）。
+      // push 上限 5 則 message，超過就不附（Flex 優先，長文是附加品）。
+      if (lf && messages.length < 5) {
+        messages.push({ type: "image", originalContentUrl: lf.url, previewImageUrl: lf.preview });
+      }
       await post("LINE flex", lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, messages));
       sentVia.push("line-flex");
     } catch (e) {

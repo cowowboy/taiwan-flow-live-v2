@@ -43,7 +43,13 @@ FONT_DIR = ROOT / "fonts"
 
 W = 1040                      # 固定寬
 ROW_H = 96                    # 排行卡每列高
-MAX_PNG_BYTES = 1_000_000     # LINE hero 圖保守上限（官方建議 ≤1MB；硬上限 10MB）
+MAX_PNG_BYTES = 1_000_000     # LINE Flex hero 圖保守上限（官方建議 ≤1MB；硬上限 10MB）
+# 長文卡走**獨立 Image message**（官方 2020-05 起像素無上限、檔案 10MB；
+# https://developers.line.biz/en/news/2020/05/12/messaging-api-update-may-2020/），
+# 不受 Flex 的 1024×1024 與 3:1 aspectRatio 限制，故不過 fit_line_limit。
+MAX_LONGFORM_BYTES = 9_000_000    # 保守留 1MB 餘裕給 LINE 端
+MAX_PREVIEW_BYTES = 1_000_000     # previewImageUrl 官方硬上限 1MB
+LONGFORM_COLORS = 64              # palette 量化（實測 1.2MB→0.29MB，PSNR 37dB 近無損）
 LINE_IMG_MAX = 1024           # LINE Flex image 官方上限 1024×1024 px（兩軸都限）
 DISCLAIMER = "數據僅供參考，不代表投資建議"
 
@@ -239,15 +245,18 @@ def footer_lines(draw, card, F_R):
     return lines
 
 
-def draw_footer(draw, y: int, lines, F_R) -> int:
+def draw_footer(draw, y: int, lines, F_R, disc: str | None = None) -> int:
+    """disc＝該卡專屬免責句（長文卡用）；None 走全站通用 DISCLAIMER。"""
     f = F_R(24)
     draw.line([(PAD, y), (W - PAD, y)], fill=C_DIVIDER, width=2)
     y += 18
     for ln in lines:
         draw.text((PAD, y), ln, font=f, fill=C_NOTE)
         y += 34
-    draw.text((PAD, y + 4), f"※ {DISCLAIMER}", font=f, fill=C_DISC)
-    return y + 34 + 18
+    for ln in wrap_text(draw, f"※ {disc or DISCLAIMER}", f, W - 2 * PAD):
+        draw.text((PAD, y + 4), ln, font=f, fill=C_DISC)
+        y += 34
+    return y + 18
 
 
 def render_ranking(card, F_B, F_R):
@@ -361,7 +370,55 @@ def render_paras(card, F_B, F_R):
     return img
 
 
+# 長文版型：內文左對齊 Regular（render_paras 是 34px 粗體置中，為一兩段短句設計，
+# 2000 字那樣排不可讀）；`##` 段標粗體拉層次。畫布高度隨內容長，不縮放。
+LF_BODY, LF_HEAD, LF_LH, LF_GAP = 34, 40, 52, 22
+
+
+def render_longform(card, F_B, F_R):
+    """長文卡（盤後分析摘要）：整篇 markdown 逐行排版，供 LINE Image message 用。"""
+    from PIL import Image, ImageDraw
+    probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
+    f_body, f_head = F_R(LF_BODY), F_B(LF_HEAD)
+    maxw = W - 2 * PAD
+
+    laid = []                                   # (font|None, line, is_head)；None＝段距
+    for raw in [str(x) for x in (card.get("paras") or [])]:
+        line = raw.strip()
+        if not line:
+            continue
+        is_head = line.startswith("#")
+        if is_head:
+            line = line.lstrip("#").strip()
+        else:
+            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)   # 去掉 markdown 粗體標記
+        f = f_head if is_head else f_body
+        for ln in wrap_text(probe, line, f, maxw):
+            laid.append((f, ln, is_head))
+        laid.append((None, "", False))
+
+    flines = footer_lines(probe, card, F_R)
+    disc = card.get("disclaimer") or DISCLAIMER
+    dlines = wrap_text(probe, f"※ {disc}", F_R(24), W - 2 * PAD)
+    h = (HEADER_H + 24 + sum(LF_LH if f is not None else LF_GAP for f, _, _ in laid)
+         + 24 + (18 + (len(flines) + len(dlines)) * 34 + 18))
+    img = gradient_bg(h)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, card, F_B, F_R)
+    y = HEADER_H + 24
+    for f, ln, is_head in laid:
+        if f is None:
+            y += LF_GAP
+            continue
+        draw.text((PAD, y), ln, font=f, fill=C_TITLE if is_head else C_NAME)
+        y += LF_LH
+    draw_footer(draw, y + 4, flines, F_R, disc)
+    return img
+
+
 def render_card(card, F_B, F_R):
+    if card.get("kind") == "longform":
+        return render_longform(card, F_B, F_R)
     rows, paras = card.get("rows") or [], card.get("paras") or []
     if rows and card.get("id") in DASH_IDS:
         return render_dashboard(card, F_B, F_R)
@@ -413,6 +470,7 @@ def fit_line_limit(img):
 
 
 def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
+    from PIL import Image
     # date ＝ Worker /cards/data 回的**資料日**（baseline.date），非渲染當日。
     # 缺或格式不對就拒渲染：manifest 沒有可信日期時，寧可當晚退文字版，
     # 也不能產出「日期不明」的圖讓 attachCardImages 有機會誤放行。
@@ -422,7 +480,7 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     for p in out_dir.glob("*.png"):   # 清掉上一日殘圖（manifest 是唯一權威，殘檔只會誤導）
         p.unlink()
-    images, ratios = {}, {}
+    images, ratios, previews = {}, {}, {}
     for card in data.get("cards") or []:
         cid = str(card.get("id", ""))
         if not _ID_RE.match(cid):
@@ -432,12 +490,39 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
         if img is None:
             print(f"WARN: 卡 {cid} 無 rows/paras 可渲染（跳過）", file=sys.stderr)
             continue
-        img = fit_line_limit(img)
+        longform = card.get("kind") == "longform"
         path = out_dir / f"{cid}.png"
-        img.save(path, format="PNG", optimize=True)
+        if longform:
+            # Image message：不縮尺寸（那正是走這條路的理由），改用 palette 量化壓檔案
+            img.convert("P", palette=Image.ADAPTIVE, colors=LONGFORM_COLORS).save(
+                path, format="PNG", optimize=True)
+        else:
+            img = fit_line_limit(img)
+            img.save(path, format="PNG", optimize=True)
         size = path.stat().st_size
-        if size >= MAX_PNG_BYTES:
-            raise SystemExit(f"ERROR: {path.name} {size}B ≥ 1MB 上限（LINE hero 圖守門）")
+        # 超標「跳過本卡」而非中止整批：2026-08-07 前是 raise SystemExit，單卡超標會讓
+        # render step 失敗 → commit step 不執行 → manifest 停在昨日 → 當晚**全部**卡退純文字。
+        limit = MAX_LONGFORM_BYTES if longform else MAX_PNG_BYTES
+        if size >= limit:
+            print(f"WARN: 卡 {cid} {size}B ≥ 上限 {limit}B（跳過本卡，不影響其他卡）",
+                  file=sys.stderr)
+            path.unlink(missing_ok=True)
+            continue
+        if longform:
+            # 聊天室先顯示的預覽：上緣 crop 成正方（開頭清晰可讀），點開才看全圖。
+            # 整張縮小反而糊；官方對超長直圖在 bubble 內如何裁切無明文，故自己控。
+            pv = out_dir / f"{cid}-preview.png"
+            img.crop((0, 0, W, min(W, img.height))).convert(
+                "P", palette=Image.ADAPTIVE, colors=LONGFORM_COLORS).save(
+                pv, format="PNG", optimize=True)
+            pv_size = pv.stat().st_size
+            if pv_size >= MAX_PREVIEW_BYTES:
+                print(f"WARN: 卡 {cid} 預覽 {pv_size}B ≥ 1MB（跳過長文卡）", file=sys.stderr)
+                path.unlink(missing_ok=True)
+                pv.unlink(missing_ok=True)
+                continue
+            previews[cid] = f"{RAW_BASE}/{cid}-preview.png?d={date}"
+            print(f"  {cid}-preview.png  {min(W, img.height)}x{min(W, img.height)}  {pv_size}B")
         # URL 帶日期 query 破 LINE 端快取（同一路徑隔日換圖，LINE CDN 會沿用舊圖）
         images[cid] = f"{RAW_BASE}/{cid}.png?d={date}"
         ratios[cid] = f"{img.width}:{img.height}"
@@ -445,7 +530,7 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
     tz8 = timezone(timedelta(hours=8))
     manifest = {"date": date,
                 "generated_at": datetime.now(tz8).isoformat(timespec="seconds"),
-                "images": images, "ratios": ratios}
+                "images": images, "ratios": ratios, "previews": previews}
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return manifest

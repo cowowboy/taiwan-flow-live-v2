@@ -2,7 +2,8 @@
 // 執行：cd worker && node test/cardsend.mjs
 // 守的規格：docs/line-cards-spec.md 第 5 節（發送層）、9.3（判空/預過濾/退純文字/KV 去重）。
 import { pushDailyCards, fetchCardSources, cardSourceUrls, CARDS_PUSH_AFTER_MIN,
-  alertedKey, runEvening, buildCardsData, attachCardImages, FX_ACTIVE_CARDS } from "../src/index.js";
+  alertedKey, runEvening, buildCardsData, attachCardImages, FX_ACTIVE_CARDS,
+  longformImage, FX_LONGFORM_CARD, FX_NEUTRALIZE } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -156,7 +157,7 @@ const FULL = () => ({
   chk("0 卡 → KV 記 skip-empty", kv._m.get(DEDUP_KEY) === "skip-empty");
 }
 
-// ---- ⑥ 正常路徑：14 支 fetch、flex carousel、altText 帶序號、成功寫 KV ----
+// ---- ⑥ 正常路徑：15 支 fetch、flex carousel、altText 帶序號、成功寫 KV ----
 {
   const spy = [];
   const kv = fakeKV();
@@ -167,7 +168,7 @@ const FULL = () => ({
   chk("正常 → 卡數>0（來源缺的卡進 skipped 不擋）", out.cards > 0 && out.skippedCards > 0, JSON.stringify(out));
   const wanted = new Set(Object.values(URLS));
   const got = productUrls(spy);
-  chk("正常 → 14 支來源 JSON 全打過（13 支資料＋manifest）", wanted.size === 14 && [...wanted].every((u) => got.has(u)),
+  chk("正常 → 15 支來源 JSON 全打過（14 支資料＋manifest）", wanted.size === 15 && [...wanted].every((u) => got.has(u)),
     `wanted=${wanted.size} got=${got.size}`);
   const lc = lineCalls(spy);
   chk("正常 → LINE 恰一次 push", lc.length === 1 && lc[0].kind === "line-flex");
@@ -260,7 +261,8 @@ const FULL = () => ({
   const hits = [];
   const src2 = await fetchCardSources(ENV_BASE, TP, () => { throw new Error("不該用到 fetchFn"); },
     { getProduct: async (u) => { hits.push(u); return u === URLS.baseline ? { date: TODAY } : null; } });
-  chk("getProduct 注入 → 14 支全走快取層", hits.length === 14 && src2.baseline.date === TODAY);
+  chk("getProduct 注入 → 15 支全走快取層", hits.length === 15 && src2.baseline.date === TODAY,
+    `hits=${hits.length}`);
 }
 
 // ---- ⑪ 接線：runEvening 附加步驟（既有鏈不受影響、錯誤被隔離）----
@@ -371,8 +373,9 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
   const spy = [];
   const out = await buildCardsData({ ...ENV_BASE, FINMIND_TOKEN: "tk" }, TP, mkFetch(FULL(), spy));
   chk("回 {date, cards}", out.date === TODAY && Array.isArray(out.cards), JSON.stringify(Object.keys(out)));
-  chk("卡片全在 FX_ACTIVE_CARDS 白名單內", out.cards.length > 0
-    && out.cards.every((c) => FX_ACTIVE_CARDS.has(c.id)), out.cards.map((c) => c.id).join(","));
+  chk("卡片全在 FX_ACTIVE_CARDS 白名單內（長文卡除外）", out.cards.length > 0
+    && out.cards.every((c) => FX_ACTIVE_CARDS.has(c.id) || c.id === FX_LONGFORM_CARD),
+  out.cards.map((c) => c.id).join(","));
   chk("含活躍卡 v2-ov-1／sig-dual-buy", ["v2-ov-1", "sig-dual-buy"].every((id) =>
     out.cards.some((c) => c.id === id)));
   chk("不含被裁剪卡（v2-ov-5／sig-new-high 有源也不出）",
@@ -381,7 +384,148 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
     c.title && ((c.rows || []).length || (c.paras || []).length)));
   chk("有 FINMIND_TOKEN 也不打 FinMind（noVix）", !spy.some((c) => c.url.includes("finmind")));
   const wanted = new Set(Object.values(cardSourceUrls(ENV_BASE, TODAY)));
-  chk("走同一套 14 支來源", [...productUrls(spy)].every((u) => wanted.has(u)));
+  chk("走同一套 15 支來源", wanted.size === 15 && [...productUrls(spy)].every((u) => wanted.has(u)),
+    `wanted=${wanted.size}`);
+}
+
+// ---- ⑭ 盤後分析摘要長文卡（2026-08-07）：獨立 Image message，不進 Flex carousel ----
+// 全文約 2000 字，Flex hero 塞不下 → 由 Python 渲染成長圖，manifest 帶 images＋previews。
+const LF_URL = IMG(FX_LONGFORM_CARD);
+const LF_PRV = `${IMG(FX_LONGFORM_CARD)}&p=1`;
+const MANIFEST_LF = (date = TODAY) => ({ ...MANIFEST(date),
+  images: { ...MANIFEST(date).images, [FX_LONGFORM_CARD]: LF_URL },
+  previews: { [FX_LONGFORM_CARD]: LF_PRV } });
+const SUMMARY_PM = (date = TODAY) => ({ date, slot: "pm", synthesis: { text: [
+  "## 綜合研判",
+  "大盤收 43654.84 點、下跌 1195.97 點（-2.66%），成交 7780 億元，廣度漲 612 跌 1483。",
+  "資金自晶圓製造流出，轉進電信服務業與貨櫃航運；運算設備買盤最強，連兩日土洋同買。",
+  "後續觀察：外資台指期未平倉淨空 76,260 口、較上月底增加，短線震盪風險仍在。",
+].join("\n") } });
+const FULL_LF = (o = {}) => ({ ...FULL(),
+  [URLS.summaryPm]: SUMMARY_PM(o.summaryDate),
+  [URLS.manifest]: o.manifest === undefined ? MANIFEST_LF() : o.manifest });
+const imgMsgs = (spy) => lineCalls(spy)[0].body.messages.filter((m) => m.type === "image");
+
+// ⑭a longformImage 守門：當日＋images/previews 齊全且都是 https 才回物件
+{
+  const ok = longformImage(MANIFEST_LF(), TODAY);
+  chk("longformImage 齊全 → 回 {url, preview}",
+    ok && ok.url === LF_URL && ok.preview === LF_PRV, JSON.stringify(ok));
+  const M = MANIFEST_LF();
+  const cases = [
+    ["manifest=null", null, TODAY],
+    ["manifest=undefined", undefined, TODAY],
+    ["非當日（昨日圖）", MANIFEST_LF("2026-07-18"), TODAY],
+    ["manifest 無 date", { images: M.images, previews: M.previews }, TODAY],
+    ["缺 images 整段", { date: TODAY, previews: M.previews }, TODAY],
+    ["images 缺長文卡", { date: TODAY, images: MANIFEST().images, previews: M.previews }, TODAY],
+    ["缺 previews 整段", { date: TODAY, images: M.images }, TODAY],
+    ["previews 缺長文卡", { date: TODAY, images: M.images, previews: { "v2-ov-1": LF_PRV } }, TODAY],
+    ["url 非 https", { date: TODAY, images: { [FX_LONGFORM_CARD]: "http://x/lf.png" }, previews: M.previews }, TODAY],
+    ["preview 非 https", { date: TODAY, images: M.images, previews: { [FX_LONGFORM_CARD]: "http://x/p.png" } }, TODAY],
+    ["url 非字串", { date: TODAY, images: { [FX_LONGFORM_CARD]: 42 }, previews: M.previews }, TODAY],
+    ["preview 非字串", { date: TODAY, images: M.images, previews: { [FX_LONGFORM_CARD]: null } }, TODAY],
+  ];
+  for (const [label, mf, d] of cases) {
+    chk(`longformImage ${label} → null`, longformImage(mf, d) === null, JSON.stringify(longformImage(mf, d)));
+  }
+}
+// ⑭b 有長文圖 → messages 最後一則是 image，URL 正確；carousel 照舊
+{
+  const spy = [];
+  const kv = fakeKV();
+  const base = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL(), []), { dry: true });
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP, mkFetch(FULL_LF(), spy));
+  chk("有長文圖 → 照常 sent 並寫 KV", out.sent === true && kv._m.get(DEDUP_KEY) === "pushed", JSON.stringify(out));
+  const msgs = lineCalls(spy)[0].body.messages;
+  const last = msgs[msgs.length - 1];
+  chk("最後一則是 image message", last.type === "image", JSON.stringify(msgs.map((m) => m.type)));
+  chk("image 的 originalContentUrl／previewImageUrl 正確",
+    last.originalContentUrl === LF_URL && last.previewImageUrl === LF_PRV, JSON.stringify(last));
+  chk("其餘皆為 flex carousel", msgs.slice(0, -1).every((m) => m.type === "flex"
+    && m.contents.type === "carousel") && msgs.length >= 2, JSON.stringify(msgs.map((m) => m.type)));
+  chk("恰一則 image（長文只送一張）", imgMsgs(spy).length === 1);
+  chk("長文卡不進 carousel（bubble 內找不到「盤後分析摘要」）",
+    !JSON.stringify(msgs.filter((m) => m.type === "flex")).includes("盤後分析摘要"));
+  chk("carousel 張數與無長文時相同（長文純附加）", out.cards === base.wouldPush,
+    `withLf=${out.cards} base=${base.wouldPush}`);
+  chk("長文圖不佔用 hero（attachCardImages 只吃 carousel 卡）", out.imgs === 2, `${out.imgs}`);
+  // dry 回傳的 longform 欄位
+  const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL_LF(), []), { dry: true });
+  chk("dry → longform=attached", dry.longform === "attached", JSON.stringify(dry));
+}
+// ⑭c 長文卡文字踩禁用字、中性化沒對照 → 該卡被 assertCardAllowed 剔除，carousel 不連坐
+// 現況 FX_NEUTRALIZE 1:1 覆蓋 FX_FORBIDDEN（見 dailycards.mjs 第 9 節），故臨時拿掉一條
+// 對照來模擬「有禁用字但中性化表沒收」的情形——這正是 assertCardAllowed 這道最後防線的用途。
+{
+  const saved = FX_NEUTRALIZE["最強"];
+  delete FX_NEUTRALIZE["最強"];
+  try {
+    const spy = [];
+    const kv = fakeKV();
+    const base = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL(), []), { dry: true });
+    const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP, mkFetch(FULL_LF(), spy));
+    chk("長文卡踩禁用字 → 仍照常送出（不連坐）", out.sent === true && kv._m.get(DEDUP_KEY) === "pushed",
+      JSON.stringify(out));
+    chk("長文卡踩禁用字 → 記 dropped 1 張", out.dropped === 1, JSON.stringify(out.dropped));
+    chk("長文卡踩禁用字 → carousel 張數不變", out.cards === base.wouldPush,
+      `dropped=${out.cards} base=${base.wouldPush}`);
+    chk("長文卡踩禁用字 → 不送 image message（有圖也不送）", imgMsgs(spy).length === 0,
+      JSON.stringify(lineCalls(spy)[0].body.messages.map((m) => m.type)));
+    chk("長文卡踩禁用字 → payload 全無禁用字", !JSON.stringify(lineCalls(spy)[0].body).includes("最強"));
+    const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL_LF(), []), { dry: true });
+    chk("長文卡被剔除 → dry longform=no-card", dry.longform === "no-card", JSON.stringify(dry));
+  } finally { FX_NEUTRALIZE["最強"] = saved; }
+  chk("測試後 FX_NEUTRALIZE 已還原", FX_NEUTRALIZE["最強"] === "最大");
+}
+// ⑭d manifest 沒有長文圖（或非當日）→ 只送 flex，不送 image message
+{
+  for (const [label, mf] of [
+    ["manifest 無 previews", MANIFEST()],
+    ["manifest 非當日", MANIFEST_LF("2026-07-18")],
+    ["manifest 缺檔", undefined],
+  ]) {
+    const spy = [];
+    const byUrl = FULL_LF({ manifest: mf === undefined ? null : mf });
+    if (mf === undefined) delete byUrl[URLS.manifest];
+    const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, spy));
+    chk(`${label} → 照推 flex`, out.sent === true && out.cards > 0, JSON.stringify(out));
+    chk(`${label} → 零 image message`, imgMsgs(spy).length === 0,
+      JSON.stringify(lineCalls(spy)[0].body.messages.map((m) => m.type)));
+    const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, []), { dry: true });
+    chk(`${label} → dry longform=no-image`, dry.longform === "no-image", JSON.stringify(dry));
+  }
+  // summaryPm 缺檔（長文卡沒產出）→ no-card，且不因此少送 flex
+  const spy = [];
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP,
+    mkFetch({ ...FULL(), [URLS.manifest]: MANIFEST_LF() }, spy));
+  chk("summaryPm 缺 → 照推 flex、零 image", out.sent === true && imgMsgs(spy).length === 0);
+  const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP,
+    mkFetch({ ...FULL(), [URLS.manifest]: MANIFEST_LF() }, []), { dry: true });
+  chk("summaryPm 缺 → dry longform=no-card", dry.longform === "no-card", JSON.stringify(dry));
+  // 摘要日≠資料日 → 長文卡 skip（不得把昨日分析當今日推）
+  const spy2 = [];
+  const out2 = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP,
+    mkFetch(FULL_LF({ summaryDate: "2026-07-18" }), spy2));
+  chk("摘要日≠資料日 → 零 image message", out2.sent === true && imgMsgs(spy2).length === 0);
+}
+// ⑭e flex 推送失敗退純文字時，長文不摻進純文字（純文字只走 carousel 卡）
+{
+  const spy = [];
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP,
+    mkFetch(FULL_LF(), spy, { lineFailFlex: true }));
+  chk("有長文＋flex 失敗 → 退純文字成功", out.sent === true && out.via.includes("line-text"), JSON.stringify(out));
+  const txt = lineCalls(spy)[1].body.messages[0].text;
+  chk("純文字版不含長文全文（長文只靠圖，退路不塞 2000 字）", !txt.includes("盤後分析摘要"), txt.slice(0, 120));
+}
+// ⑭f /cards/data 端點要帶長文卡（Python 渲染的上游）
+{
+  const out = await buildCardsData({ ...ENV_BASE }, TP, mkFetch(FULL_LF(), []));
+  const lf = out.cards.find((c) => c.id === FX_LONGFORM_CARD);
+  chk("/cards/data 含長文卡", !!lf, out.cards.map((c) => c.id).join(","));
+  chk("/cards/data 長文卡 kind=longform＋paras 非空", lf && lf.kind === "longform" && lf.paras.length > 0);
+  chk("/cards/data 長文卡已中性化（最強→最大）", lf && !JSON.stringify(lf.paras).includes("最強")
+    && JSON.stringify(lf.paras).includes("買盤最大"));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

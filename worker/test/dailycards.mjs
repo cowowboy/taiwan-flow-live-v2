@@ -3,7 +3,9 @@
 // 守的規格：docs/line-cards-spec.md 第 9.3 節驗收條件。
 // fixture 皆從 2026-07-24 真實 data/ 檔抄縮減版（每源 3~5 筆），baseline 用 Phase A 後 schema。
 import { buildDailyCards, fxRegime, FX_CARD_BUILDERS,
-  cardBubble, buildCardCarousels, cardsFallbackText } from "../src/index.js";
+  cardBubble, buildCardCarousels, cardsFallbackText,
+  FX_ACTIVE_CARDS, FX_FORBIDDEN, FX_LONGFORM_CARD, FX_NEUTRALIZE, fxNeutralize,
+  assertCardAllowed } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -149,6 +151,16 @@ const FIX = () => ({
       aetf_date: "2026/07/23",
     },
   },
+  summaryPm: {   // postmkt data/summary/20260724-pm.json 縮減版（AI 長文；刻意留禁用字驗中性化）
+    date: "2026-07-24", slot: "pm",
+    synthesis: { text: [
+      "## 綜合研判",
+      "大盤收 43654.84 點、下跌 1195.97 點（-2.66%），成交 7780 億元，廣度漲 612 跌 1483。",
+      "外資賣超 609.5 億元、投信買超 47.6 億元；資金自晶圓製造流出，轉進電信服務業與貨櫃航運。",
+      "次產業中運算設備買盤最強，連兩日出現土洋同買；晶圓製造則由借券賣壓主導。",
+      "後續觀察：外資台指期未平倉淨空 76,260 口、較上月底增加，短線震盪風險仍在。",
+    ].join("\n") },
+  },
   us: {
     date: "2026-07-23",
     brief: "7/23美股大跌，費半-0.5%，台積ADR-1.3%(溢價+12%)，電子開盤中性，特斯拉-14.5%領跌。",
@@ -165,11 +177,11 @@ const B_IDS = ["v2-rank-1", "flows-foreign-1", "flows-trust-1", "pm-aetf-2", "pm
   "pm-aetf-5", "pm-lending-3", "pm-lending-4", "pm-lending-6"];
 const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low", "sig-exit-sell", "sig-surge-warn"];
 
-// ---- 1. 完整 fixture → 33 張全產出 ----
+// ---- 1. 完整 fixture → 34 張全產出 ----
 {
   const { cards, skipped } = buildDailyCards(FIX());
-  chk("builder 表共 33 張", FX_CARD_BUILDERS.length === 33, `${FX_CARD_BUILDERS.length}`);
-  chk("完整 fixture 33 張全產出", cards.length === 33, `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
+  chk("builder 表共 34 張", FX_CARD_BUILDERS.length === 34, `${FX_CARD_BUILDERS.length}`);
+  chk("完整 fixture 34 張全產出", cards.length === 34, `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
   chk("skipped 空", skipped.length === 0, JSON.stringify(skipped));
   chk("id 集合與 builder 表一致", JSON.stringify(cards.map((c) => c.id)) === JSON.stringify(ALL_IDS));
   chk("每張卡 sub 帶資料日", cards.every((c) => /資料日/.test(c.sub || "")),
@@ -234,7 +246,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   chk("空頭：卡2 skipped reason=regime-bear", sk["sig-dual-buy"] === "regime-bear");
   chk("空頭：卡3-6 照常產出", ["sig-new-high", "sig-new-low", "sig-exit-sell", "sig-surge-warn"]
     .every((id) => cards.some((c) => c.id === id)));
-  chk("空頭：其餘 27 張不受影響", cards.length === 31, `${cards.length}`);
+  chk("空頭：其餘 32 張不受影響", cards.length === 32, `${cards.length}`);
   // regime 未判定 → 卡1/2 照發並在 note 標註
   const fx2 = FIX(); fx2.totals = mkTotals({ days: 10 });
   const r2 = buildDailyCards(fx2);
@@ -244,7 +256,9 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
 // ---- 5. 逐源缺失 → 對應卡 skipped、其他不受影響 ----
 {
   const DEP = {   // 來源鍵 → 預期受影響卡
-    baseline: SIG_IDS,
+    // 2026-08-07 收緊：長文卡的日期守門要求 dataDate 必須存在（沒有可信資料日就
+    // 無從核對摘要是不是當日的），故缺 baseline 時它也一起 skip
+    baseline: [...SIG_IDS, "pm-summary-1"].sort(),
     flowsDaily: ["sig-dual-buy", "sig-surge-warn", "v2-rank-1"],
     daysummary: ["v2-global-1", "v2-ov-1", "v2-ov-5", "v2-ov-6", "v2-ov-7", "v2-ov-8",
       "v2-ov-14", "v2-chain-1", "news-morning-3"],
@@ -255,6 +269,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     morning: ["news-morning-2"],
     us: ["news-morning-4"],
     aetfDiff: ["pm-aetf-2", "pm-aetf-4", "pm-aetf-5"],
+    summaryPm: ["pm-summary-1"],
   };
   for (const [src, ids] of Object.entries(DEP)) {
     const fx = FIX(); fx[src] = null;
@@ -262,13 +277,13 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const skIds = skipped.map((s) => s.id).sort();
     chk(`缺 ${src} → 只有對應卡 skipped`, JSON.stringify(skIds) === JSON.stringify([...ids].sort()),
       `skipped=${JSON.stringify(skIds)}`);
-    chk(`缺 ${src} → 其餘 ${33 - ids.length} 張照常`, cards.length === 33 - ids.length, `${cards.length}`);
+    chk(`缺 ${src} → 其餘 ${34 - ids.length} 張照常`, cards.length === 34 - ids.length, `${cards.length}`);
   }
   // totals 缺：flows-hdr-1 skipped，卡1/2 因 regime 未判定仍照發
   { const fx = FIX(); fx.totals = null;
     const { cards, skipped } = buildDailyCards(fx);
     chk("缺 totals → 只有 flows-hdr-1 skipped（卡1/2 視為未判定照發）",
-      skipped.length === 1 && skipped[0].id === "flows-hdr-1" && cards.length === 32,
+      skipped.length === 1 && skipped[0].id === "flows-hdr-1" && cards.length === 33,
       JSON.stringify(skipped)); }
   // vix 缺：v2-global-1 照發、VIX 欄顯「—」
   { const fx = FIX(); fx.vix = null;
@@ -281,9 +296,10 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const { cards, skipped } = buildDailyCards(fx);
     const r = cards.find((c) => c.id === "v2-rank-1");
     chk("缺 lastweek → rank-1 照發、無上週括號", skipped.length === 0 && r && !/上週 /.test(r.rows[0].r)); }
-  // 全空 src：33 張全 skipped、不炸
+  // 全空 src：34 張全 skipped、不炸
   { const { cards, skipped } = buildDailyCards({});
-    chk("全空 src → 0 卡、33 skipped、不拋例外", cards.length === 0 && skipped.length === 33); }
+    chk("全空 src → 0 卡、34 skipped、不拋例外", cards.length === 0 && skipped.length === 34,
+      `cards=${cards.length} skipped=${skipped.length}`); }
   // 舊 schema baseline（Phase A 前，8 欄）→ 卡3/4 skipped 並說明缺欄
   { const fx = FIX();
     for (const k of Object.keys(fx.baseline.stocks)) fx.baseline.stocks[k] = fx.baseline.stocks[k].slice(0, 8);
@@ -298,11 +314,11 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const { cards } = buildDailyCards(FIX());
   let bubbleErr = null;
   for (const c of cards) { try { cardBubble(c); } catch (e) { bubbleErr = `${c.id}: ${e.message}`; break; } }
-  chk("33 張逐卡過 cardBubble（含誠實原則守門）", bubbleErr === null, bubbleErr);
+  chk("34 張逐卡過 cardBubble（含誠實原則守門）", bubbleErr === null, bubbleErr);
   let msgs = null, carErr = null;
   try { msgs = buildCardCarousels(cards, "股市雷達 2026-07-24 盤後圖卡"); } catch (e) { carErr = e.message; }
   chk("buildCardCarousels 整包不炸", carErr === null, carErr);
-  chk("34 bubble（含免責）→ 3 carousel ≤5 message", msgs && msgs.length === 3, msgs && `${msgs.length}`);
+  chk("35 bubble（含免責）→ 3 carousel ≤5 message", msgs && msgs.length === 3, msgs && `${msgs.length}`);
   chk("每 carousel ≤12 bubble", msgs && msgs.every((m) => m.contents.contents.length <= 12));
   let fb = null, fbErr = null;
   try { fb = cardsFallbackText(cards, "2026-07-24"); } catch (e) { fbErr = e.message; }
@@ -344,7 +360,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
 
 // ---- 8. 形狀壞的源不得全滅（B1 驗收 A2 缺口的回歸測試）----
 // 「非 null 但形狀歪」：rows=42、buy_by_amt={}、dates=42——修正前這三種都會讓
-// 共用 ctx 建構（fxNameMap/fxRegime）拋例外、33 張全滅。
+// 共用 ctx 建構（fxNameMap/fxRegime）拋例外、34 張全滅。
 {
   for (const [label, mut] of [
     ["lending.rows=42", (f) => { f.postmkt.lending.rows = 42; }],
@@ -364,6 +380,101 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const c1 = out.cards.find((c) => c.id === "sig-sub-surge");
   chk("totals 壞 → regime 降級未判定、卡1 照發且帶標註",
     c1 && /regime 未判定/.test([c1.note, c1.foot].join("")), c1 && (c1.note || c1.foot));
+}
+
+// ---- 9. 盤後分析摘要長文卡 pm-summary-1（2026-08-07 新增；走獨立 Image message）----
+// 這張不進 Flex carousel：全文約 2000 字，Flex hero 塞不下（見 src FX_LONGFORM_CARD 註）。
+{
+  const { cards, skipped } = buildDailyCards(FIX());
+  const lf = cards.find((c) => c.id === FX_LONGFORM_CARD);
+  chk("完整 fixture → 長文卡有產出", !!lf, JSON.stringify(skipped));
+  chk("長文卡 kind=longform", lf && lf.kind === "longform", lf && lf.kind);
+  chk("長文卡 paras 非空（逐行拆）", lf && (lf.paras || []).length >= 4, lf && `${lf.paras.length}`);
+  chk("長文卡 sub 含「AI 生成」＋資料日", lf && /AI 生成/.test(lf.sub) && /資料日 2026-07-24/.test(lf.sub),
+    lf && lf.sub);
+  chk("長文卡保留 markdown 段標", lf && lf.paras.some((p) => p.startsWith("## ")), lf && lf.paras[0]);
+  chk("長文卡 note 標明與其餘卡不同（含推測性內容）", lf && /推測性內容/.test(lf.note) && /非投資建議/.test(lf.note),
+    lf && lf.note);
+  chk("長文卡帶 disclaimer（AI 生成、未經回測）", lf && /AI/.test(lf.disclaimer) && /未經回測/.test(lf.disclaimer),
+    lf && lf.disclaimer);
+  // 中性化：fixture 刻意寫「買盤最強」，卡面必須已換成「買盤最大」且過得了誠實原則守門
+  const parasStr = lf ? JSON.stringify(lf.paras) : "";
+  chk("長文卡禁用字已中性化（最強→最大）",
+    !parasStr.includes("最強") && parasStr.includes("買盤最大"), parasStr.slice(0, 160));
+  chk("長文卡卡面零禁用字", !FX_FORBIDDEN.some((w) =>
+    JSON.stringify([lf && lf.title, lf && lf.sub, lf && lf.paras, lf && lf.note]).includes(w)),
+    FX_FORBIDDEN.filter((w) => parasStr.includes(w)).join(","));
+  let lfErr = null;
+  try { assertCardAllowed(lf); } catch (e) { lfErr = e.message; }
+  chk("長文卡過 assertCardAllowed 不拋錯", lfErr === null, lfErr);
+  // 一旦被誤加進 FX_ACTIVE_CARDS，2000 字長文就會變成 carousel bubble（版面爆掉）
+  chk("pm-summary-1 不在 FX_ACTIVE_CARDS", !FX_ACTIVE_CARDS.has(FX_LONGFORM_CARD),
+    [...FX_ACTIVE_CARDS].join(","));
+  chk("FX_LONGFORM_CARD 常數＝pm-summary-1", FX_LONGFORM_CARD === "pm-summary-1");
+  chk("長文卡在 builder 表內（第 34 項）",
+    FX_CARD_BUILDERS.length === 34 && FX_CARD_BUILDERS[33][0] === FX_LONGFORM_CARD,
+    FX_CARD_BUILDERS[FX_CARD_BUILDERS.length - 1][0]);
+}
+{
+  // 日期守門：摘要日 ≠ 資料日（baseline.date）→ skip，不得把昨日分析標成今日
+  const fx = FIX(); fx.summaryPm = { ...fx.summaryPm, date: "2026-07-23" };
+  const { cards, skipped } = buildDailyCards(fx);
+  const sk = Object.fromEntries(skipped.map((s) => [s.id, s.reason]));
+  chk("摘要日≠資料日 → skip、理由含「日期不符」", /日期不符/.test(sk[FX_LONGFORM_CARD] || ""),
+    sk[FX_LONGFORM_CARD]);
+  chk("摘要日≠資料日 → 只影響長文卡，其餘 33 張照常", cards.length === 33 && skipped.length === 1,
+    `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
+}
+{
+  // 內容未就緒的各種形狀 → 一律 skip，不得產出空卡
+  for (const [label, sp] of [
+    ["synthesis 缺", { date: "2026-07-24", slot: "pm" }],
+    ["synthesis.text 缺", { date: "2026-07-24", slot: "pm", synthesis: {} }],
+    ["text 空字串", { date: "2026-07-24", slot: "pm", synthesis: { text: "" } }],
+    ["text 全空白行", { date: "2026-07-24", slot: "pm", synthesis: { text: "  \n \n\t" } }],
+    ["summaryPm 無 date", { slot: "pm", synthesis: { text: "有內容但沒日期" } }],
+  ]) {
+    const fx = FIX(); fx.summaryPm = sp;
+    const out = buildDailyCards(fx);
+    const r = (out.skipped.find((x) => x.id === FX_LONGFORM_CARD) || {}).reason;
+    chk(`${label} → 長文卡 skip`, typeof r === "string" && r.length > 0
+      && !out.cards.some((c) => c.id === FX_LONGFORM_CARD), JSON.stringify(r));
+    chk(`${label} → 其餘 33 張不連坐`, out.cards.length === 33, `${out.cards.length}`);
+  }
+  // 缺 baseline ＝ 沒有可信資料日，無從核對摘要是不是當日的 → 一律 skip（2026-08-07 收緊，
+  // 與 buildCardsData「baseline 缺 → date:null → Python 拒渲染」同一套保守立場）。
+  const fx = FIX(); fx.baseline = null;
+  const out = buildDailyCards(fx);
+  const r = (out.skipped.find((x) => x.id === FX_LONGFORM_CARD) || {}).reason || "";
+  chk("缺 baseline → 長文卡也 skip（無可信資料日）",
+    !out.cards.some((c) => c.id === FX_LONGFORM_CARD) && r.includes("日期不符"),
+    JSON.stringify(r));
+  chk("缺 baseline → skip 理由標明 data=null", r.includes("data=null"), JSON.stringify(r));
+}
+{
+  // fxNeutralize 直接單元測試：逐條對照生效、不誤傷乾淨字串、換完不殘留
+  const bad = [];
+  for (const [w, rep] of Object.entries(FX_NEUTRALIZE)) {
+    const got = fxNeutralize(`前綴${w}後綴`);
+    if (got !== `前綴${rep}後綴`) bad.push(`${w}→${got}`);
+  }
+  chk("FX_NEUTRALIZE 逐條對照皆生效", bad.length === 0, bad.join(" | "));
+  const dirty = FX_FORBIDDEN.join("／");
+  chk("整串禁用字換完零殘留", !FX_FORBIDDEN.some((w) => fxNeutralize(dirty).includes(w)),
+    FX_FORBIDDEN.filter((w) => fxNeutralize(dirty).includes(w)).join(","));
+  chk("中性詞本身不是禁用字", !Object.values(FX_NEUTRALIZE).some((v) =>
+    FX_FORBIDDEN.some((w) => v.includes(w))));
+  // 現況不變式：FX_FORBIDDEN 每個字都有對照。若日後刻意新增「不給對照、直接整張剔除」的
+  // 禁用字，這條要一起改（發送層 assertCardAllowed 是最後防線，見 cardsend.mjs ⑭c）。
+  chk("FX_NEUTRALIZE 1:1 覆蓋 FX_FORBIDDEN", FX_FORBIDDEN.every((w) => w in FX_NEUTRALIZE),
+    FX_FORBIDDEN.filter((w) => !(w in FX_NEUTRALIZE)).join(","));
+  const clean = "外資賣超 609.5 億元，成交比重 19.1%，廣度漲 612 跌 1483。";
+  chk("不含禁用字的字串原樣返回", fxNeutralize(clean) === clean, fxNeutralize(clean));
+  chk("含「關注度」等中性詞不被誤傷",
+    fxNeutralize("外資關注度上升，投信買超集中") === "外資關注度上升，投信買超集中");
+  chk("多處命中一次換完", fxNeutralize("最強與最弱同時出現，且看多看空並陳")
+    === "最大與最小同時出現，且偏多解讀偏空解讀並陳", fxNeutralize("最強與最弱同時出現，且看多看空並陳"));
+  chk("空值容錯", fxNeutralize(null) === "" && fxNeutralize(undefined) === "" && fxNeutralize("") === "");
 }
 
 console.log(`dailycards: ${pass} passed, ${fail} failed`);

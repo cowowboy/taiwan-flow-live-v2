@@ -519,3 +519,34 @@ M1 原本就採 R 值，結論不變；S2 見第 3 節卡 5。其餘排序欄平
 commit → Pages 供 HTTPS URL → Flex bubble hero 引用；PNG 缺席退文字版。
 理由：一次 push 上限 5 message，11 張獨立圖片訊息塞不下，PNG-in-Flex
 維持單 carousel。`flows-sync-1` 解鎖路徑保留（口徑覆核通過後 +1 張）。
+
+---
+
+## 3D 盤後分析摘要長文卡（2026-08-07 新增）
+
+**卡 id `pm-summary-1`，走獨立 LINE Image message，不進 Flex carousel。**
+
+- **為什麼不進 carousel**：synthesis 全文約 2000 字，Flex image 硬限 1024×1024
+  且 aspectRatio 的 height 不得超過 width 三倍。實測 34px 內文渲染成 1040×4812，
+  縮進 1024 後有效字級 7.5px、比例 4.6:1 —— 兩條都過不了。
+  Image message 自 2020-05 起官方明訂**像素無上限**、檔案 10MB
+  （developers.line.biz/en/news/2020/05/12/messaging-api-update-may-2020/）。
+- **計費**：官方按收訊人數計，非 request 內 message 物件數
+  （messaging-api/pricing #how-to-count），故附加這則圖**零計費增量**。
+  push 上限 5 則 message，超過就不附（Flex 優先）。
+- **資料流**：postmkt `data/summary/<YYYYMMDD>-pm.json` 的 `synthesis.text`
+  → Worker `fxCardSummaryLongform`（**卡片邏輯唯一來源仍在 Worker**，Python 只渲染）
+  → `/cards/data` → `render_longform` → `pm-summary-1.png` ＋ `pm-summary-1-preview.png`
+  → manifest `images`／`previews` → `pushDailyCards` 附加 image message。
+- **禁用字**：`fxNeutralize` 先把命中詞換成中性詞（LLM 生成的 2000 字踩中黑名單機率遠高於
+  人工短文案，沿用「整張丟」等於該卡常態消失），換完仍過 `assertCardAllowed` 當最後防線。
+- **誠實原則的例外處理（使用者 2026-08-07 定案）**：本卡保留全文，內含方向判斷與假設性
+  進出情境，**與其餘卡片「僅描述歷史統計傾向」不同**。因此：標題右上明標「AI 生成」、
+  改用專屬免責句取代通用那句、footer 另加一行說明本卡與其他卡的差異。
+  另兩個被否決的方案：改 `build_summary.py` prompt（會連帶改掉網頁版內容）、
+  只取「盤勢綜合研判」一節（約 287 字，不是全文）。
+- **降級**：長文任一步失敗（摘要未就緒／日期不符／渲染超標／manifest 無圖）都只是
+  「當晚沒有這則圖」，Flex carousel 完全不受影響。
+- **尚未做**：am 場。整條晚班從渲染到推播只有一班，`pushDailyCards` 無 slot 參數、
+  KV 去重鍵與時間窗都硬編碼，且早上最新 baseline 是前一交易日、日期閘門會擋下。
+
