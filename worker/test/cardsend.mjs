@@ -3,7 +3,8 @@
 // 守的規格：docs/line-cards-spec.md 第 5 節（發送層）、9.3（判空/預過濾/退純文字/KV 去重）。
 import { pushDailyCards, fetchCardSources, cardSourceUrls, CARDS_PUSH_AFTER_MIN,
   alertedKey, runEvening, buildCardsData, attachCardImages, FX_ACTIVE_CARDS,
-  longformImage, FX_LONGFORM_CARD, FX_NEUTRALIZE } from "../src/index.js";
+  longformImage, FX_LONGFORM_CARD, FX_NEUTRALIZE, CARDS_WAIT_UNTIL_MIN,
+  jobstatKey } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -22,6 +23,9 @@ function fakeKV(init = {}) {
 const TODAY = "2026-07-21";
 const DEDUP_KEY = alertedKey(TODAY, "cards");            // alerted:20260721:cards
 const TP = { date: TODAY, hour: 22, minute: 30, dow: 2 };   // 台北週二 22:30（窗下緣）
+// 窗尾（台北 23:45＝CARDS_WAIT_UNTIL_MIN）：manifest 等不到當日版時，這一輪才放棄等待退純文字。
+// 2026-08-09 修正 B 之前，manifest 非當日在 22:30 就會直接推出去並寫死去重鍵。
+const TP_TAIL = { date: TODAY, hour: 23, minute: 45, dow: 2 };
 const TRADING_KV = (extra = {}) => fakeKV({ [`series:${TODAY}`]: [{ t: "09:00", amt: 1 }], ...extra });
 const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
 const WEBHOOK = "https://discord.example/api/webhooks/1/x";
@@ -60,7 +64,15 @@ function mkTotals(days = 22) {   // taiex 緩升 → 末日 > 20MA → bull；�
   }
   return { dates, rows };
 }
+// manifest fixture（原定義在第 ⑫ 節，2026-08-09 上移——FULL() 現在預設帶當日 manifest：
+// 修正 B 之後「manifest 當日」才是正常之夜的樣子，非當日會進入等待分支而不是照推）
+const IMG = (id, d = TODAY) =>
+  `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
+const MANIFEST = (date = TODAY) => ({ date, generated_at: `${date}T22:14:00+08:00`,
+  images: { "sig-dual-buy": IMG("sig-dual-buy", date), "v2-ov-1": IMG("v2-ov-1", date) },
+  ratios: { "sig-dual-buy": "1040:1216" } });
 const FULL = () => ({
+  [URLS.manifest]: MANIFEST(),
   [URLS.baseline]: {   // Phase A 後 schema：stocks [a5,it,fi,y1,y2,ints,nl,its,nh,a20]
     date: TODAY, tot5: 1109333144542,
     stocks: {
@@ -304,12 +316,8 @@ const FULL = () => ({
   chk("evening 非交易日 → 整段 skip 零網路（含 cards）", out.skipped === "non-trading-day" && spy.length === 0);
 }
 
-// ---- ⑫ PNG hero（spec 3C）：manifest 當日→掛圖、非當日／缺檔→一律文字版 ----
-const IMG = (id, d = TODAY) =>
-  `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
-const MANIFEST = (date = TODAY) => ({ date, generated_at: `${date}T22:14:00+08:00`,
-  images: { "sig-dual-buy": IMG("sig-dual-buy", date), "v2-ov-1": IMG("v2-ov-1", date) },
-  ratios: { "sig-dual-buy": "1040:1216" } });
+// ---- ⑫ PNG hero（spec 3C）：manifest 當日→掛圖、非當日／缺檔→窗尾退文字版 ----
+// （IMG／MANIFEST 定義已上移至 FULL() 之前）
 const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.contents.contents);
 {
   // 當日 manifest：有圖的卡出 hero、body 無 rows；沒圖的卡維持原文字版型
@@ -337,18 +345,19 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
     && plain.some((b) => JSON.stringify(b).includes('"layout":"horizontal"')));
 }
 {
-  // manifest 非當日（昨日圖）→ 一張都不掛
+  // manifest 非當日（昨日圖）→ 一張都不掛（窗尾 23:45 才推，見第 ⑮ 節的等待邏輯）
   const spy = [];
   const byUrl = { ...FULL(), [URLS.manifest]: MANIFEST("2026-07-18") };
-  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, spy));
-  chk("manifest 非當日 → imgs=0、照推文字版", out.sent === true && out.imgs === 0, JSON.stringify(out));
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP_TAIL, mkFetch(byUrl, spy));
+  chk("manifest 非當日 → imgs=0、窗尾照推文字版", out.sent === true && out.imgs === 0, JSON.stringify(out));
   chk("manifest 非當日 → payload 零 hero", flexBubbles(spy).every((b) => !b.hero));
 }
 {
   // manifest 缺檔（404）→ 同樣文字版；退純文字時 hero 卡內容不變薄（rows 仍在 fallback）
   const spy = [];
-  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL(), spy));
-  chk("manifest 缺 → imgs=0、照推", out.sent === true && out.imgs === 0, JSON.stringify(out));
+  const noMf = FULL(); delete noMf[URLS.manifest];
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP_TAIL, mkFetch(noMf, spy));
+  chk("manifest 缺 → imgs=0、窗尾照推", out.sent === true && out.imgs === 0, JSON.stringify(out));
   chk("manifest 缺 → payload 零 hero", flexBubbles(spy).every((b) => !b.hero));
   const spy2 = [];
   const byUrl2 = { ...FULL(), [URLS.manifest]: MANIFEST() };
@@ -480,19 +489,20 @@ const imgMsgs = (spy) => lineCalls(spy)[0].body.messages.filter((m) => m.type ==
 }
 // ⑭d manifest 沒有長文圖（或非當日）→ 只送 flex，不送 image message
 {
-  for (const [label, mf] of [
-    ["manifest 無 previews", MANIFEST()],
-    ["manifest 非當日", MANIFEST_LF("2026-07-18")],
-    ["manifest 缺檔", undefined],
+  // manifest 非當日／缺檔者用窗尾 tp（22:30 會先進等待分支，見第 ⑮ 節）
+  for (const [label, mf, tp] of [
+    ["manifest 無 previews", MANIFEST(), TP],
+    ["manifest 非當日", MANIFEST_LF("2026-07-18"), TP_TAIL],
+    ["manifest 缺檔", undefined, TP_TAIL],
   ]) {
     const spy = [];
     const byUrl = FULL_LF({ manifest: mf === undefined ? null : mf });
     if (mf === undefined) delete byUrl[URLS.manifest];
-    const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, spy));
+    const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, tp, mkFetch(byUrl, spy));
     chk(`${label} → 照推 flex`, out.sent === true && out.cards > 0, JSON.stringify(out));
     chk(`${label} → 零 image message`, imgMsgs(spy).length === 0,
       JSON.stringify(lineCalls(spy)[0].body.messages.map((m) => m.type)));
-    const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl, []), { dry: true });
+    const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, tp, mkFetch(byUrl, []), { dry: true });
     chk(`${label} → dry longform=no-image`, dry.longform === "no-image", JSON.stringify(dry));
   }
   // summaryPm 缺檔（長文卡沒產出）→ no-card，且不因此少送 flex
@@ -526,6 +536,162 @@ const imgMsgs = (spy) => lineCalls(spy)[0].body.messages.filter((m) => m.type ==
   chk("/cards/data 長文卡 kind=longform＋paras 非空", lf && lf.kind === "longform" && lf.paras.length > 0);
   chk("/cards/data 長文卡已中性化（最強→最大）", lf && !JSON.stringify(lf.paras).includes("最強")
     && JSON.stringify(lf.paras).includes("買盤最大"));
+}
+
+// ---- ⑮ 推播時序：manifest 非當日就等，等到窗尾才退純文字（2026-08-09 修正 B）----
+// 迴歸目標：舊版在 22:30 一到就用「還是昨天的 manifest」推出去，任一通道成功即寫 KV 去重鍵
+// 短路整晚 → 23:0x 圖真的渲染好時已無第二次機會，PNG hero／長文圖從未掛上過推播。
+const STALE = () => ({ ...FULL(), [URLS.manifest]: MANIFEST("2026-07-18") });
+const NOMF = () => { const o = FULL(); delete o[URLS.manifest]; return o; };
+{
+  chk("CARDS_WAIT_UNTIL_MIN = 23:45", CARDS_WAIT_UNTIL_MIN === 23 * 60 + 45, String(CARDS_WAIT_UNTIL_MIN));
+  // ⑮a 昨日 manifest ＋ 未到窗尾 → 不推、不寫 KV、零 LINE 呼叫
+  for (const [label, byUrl] of [["manifest 昨日", STALE()], ["manifest 缺檔", NOMF()]]) {
+    const spy = [];
+    const kv = fakeKV();
+    const out = await pushDailyCards({ ...ENV_LINE, ALERT_WEBHOOK: WEBHOOK, FLOW_KV: kv },
+      TP, mkFetch(byUrl, spy));
+    chk(`${label} 22:30 → waiting manifest-not-today`, out.waiting === "manifest-not-today", JSON.stringify(out));
+    chk(`${label} 22:30 → 零 LINE／零 webhook 呼叫`,
+      lineCalls(spy).length === 0 && !spy.some((c) => c.kind === "webhook"));
+    chk(`${label} 22:30 → **不寫去重鍵**（保留當晚後續機會）`, !kv._m.has(DEDUP_KEY), [...kv._m.keys()].join(","));
+  }
+}
+{
+  // ⑮b 等待期間 manifest 補上 → 同一晚照樣掛得上圖（這正是修正 B 的目的）
+  const kv = fakeKV();
+  const env = { ...ENV_LINE, FLOW_KV: kv };
+  const wait = await pushDailyCards(env, TP, mkFetch(NOMF(), []));
+  chk("22:30 manifest 未到 → 等", wait.waiting === "manifest-not-today", JSON.stringify(wait));
+  const spy = [];
+  const late = await pushDailyCards(env, { ...TP, hour: 23, minute: 10 }, mkFetch(FULL(), spy));
+  chk("23:10 manifest 補上 → 推出去且掛到圖（imgs=2）", late.sent === true && late.imgs === 2, JSON.stringify(late));
+  chk("23:10 → payload 確實有 hero", flexBubbles(spy).some((b) => b.hero));
+  chk("23:10 → 此時才寫去重鍵", kv._m.get(DEDUP_KEY) === "pushed");
+}
+{
+  // ⑮c 等到窗尾仍沒有當日 manifest → 放棄等待、退純文字推出去並寫鍵（不得整晚不推）
+  const spy = [];
+  const kv = fakeKV();
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP_TAIL, mkFetch(STALE(), spy));
+  chk("窗尾 23:45 → 照推（不再等）", out.sent === true, JSON.stringify(out));
+  chk("窗尾 23:45 → imgs=0 且回傳帶 manifestDate 佐證",
+    out.imgs === 0 && out.manifestDate === "2026-07-18", JSON.stringify(out));
+  chk("窗尾 23:45 → 零 hero", flexBubbles(spy).every((b) => !b.hero));
+  chk("窗尾 23:45 → 寫去重鍵", kv._m.get(DEDUP_KEY) === "pushed");
+  // 窗尾之後（23:50/23:55）若前一輪推失敗，仍有重試機會
+  const spy2 = [];
+  const kv2 = fakeKV();
+  let threw = null;
+  try {
+    await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv2 }, { ...TP_TAIL, minute: 50 },
+      mkFetch(STALE(), spy2, { lineFailAll: true }));
+  } catch (e) { threw = String(e && e.message); }
+  chk("窗尾 23:50 推失敗 → 拋錯且不寫鍵（下輪 23:55 重試）",
+    threw !== null && !kv2._m.has(DEDUP_KEY), `${threw} / ${[...kv2._m.keys()].join(",")}`);
+}
+{
+  // ⑮d 0 卡之夜：不因為 manifest 沒到就卡住（0 卡等圖沒有意義）→ 立即 skip-empty
+  const kv = fakeKV();
+  const byUrl = { [URLS.baseline]: { date: TODAY, stocks: {}, subs_y: {} } };   // 無 manifest
+  const out = await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP, mkFetch(byUrl, []));
+  chk("0 卡 + manifest 缺 → 仍走 skip-empty（不進等待）", out.skipped === "no-cards", JSON.stringify(out));
+  chk("0 卡 + manifest 缺 → 有寫 skip-empty", kv._m.get(DEDUP_KEY) === "skip-empty");
+}
+{
+  // ⑮e dry 模式：不早退，仍回報 wouldPush/longform，另帶 waiting 佐證
+  const dry = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(STALE(), []), { dry: true });
+  chk("dry + manifest 昨日 → 仍回 wouldPush", dry.wouldPush > 0, JSON.stringify(dry));
+  chk("dry + manifest 昨日 → 帶 waiting/manifestDate",
+    dry.waiting === "manifest-not-today" && dry.manifestDate === "2026-07-18", JSON.stringify(dry));
+  const dry2 = await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(FULL(), []), { dry: true });
+  chk("dry + manifest 當日 → 無 waiting", dry2.waiting === undefined && dry2.imgs === 2, JSON.stringify(dry2));
+}
+
+// ---- ⑯ recordJob 觀測（2026-08-09 修正 C；驗收修正 B 的前提）----
+// 舊版 pushDailyCards 全程沒有呼叫 recordJob → /jobs?date= 與 /health?slot=eve 查不到當晚
+// 推播結局，時序有沒有修好也無從判斷。以下釘住各分支的 jobstat 紀錄。
+const JOBS = async (kv, date = TODAY) => (await kv.get(jobstatKey(date), "json")) || [];
+const cardJobs = (arr) => arr.filter((j) => j.n === "cards");
+{
+  // ⑯a 成功推播（有圖有長文）→ 一筆 pushed，extra 記通道/卡數/掛圖數/長文/manifest
+  const kv = fakeKV();
+  const out = await pushDailyCards({ ...ENV_LINE, ALERT_WEBHOOK: WEBHOOK, FLOW_KV: kv },
+    TP, mkFetch(FULL_LF(), []));
+  const js = cardJobs(await JOBS(kv));
+  chk("推播成功 → jobstat 恰 1 筆 cards", js.length === 1, JSON.stringify(js));
+  chk("推播成功 → result=pushed、t=HH:MM", js[0] && js[0].r === "pushed" && js[0].t === "22:30", JSON.stringify(js[0]));
+  chk("推播成功 → extra 記通道", js[0] && js[0].x.includes("via=line-flex+webhook"), js[0] && js[0].x);
+  chk("推播成功 → extra 記卡數與掛圖數", js[0] && js[0].x.includes(`cards=${out.cards}`)
+    && js[0].x.includes("imgs=2"), js[0] && js[0].x);
+  chk("推播成功 → extra 記長文圖已掛上", js[0] && js[0].x.includes("lf=attached"), js[0] && js[0].x);
+  chk("推播成功 → extra 記 manifest=today", js[0] && js[0].x.includes("manifest=today"), js[0] && js[0].x);
+}
+{
+  // ⑯b 窗尾退純文字（沒圖）→ pushed 但 extra 標明 imgs=0／manifest 非當日，事後可判時序沒趕上
+  const kv = fakeKV();
+  await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP_TAIL, mkFetch(STALE(), []));
+  const j = cardJobs(await JOBS(kv)).find((x) => x.r === "pushed");
+  chk("窗尾純文字 → 有 pushed 紀錄", !!j, JSON.stringify(await JOBS(kv)));
+  chk("窗尾純文字 → extra 標 imgs=0 與 manifest 日期",
+    j && j.x.includes("imgs=0") && j.x.includes("manifest=2026-07-18"), j && j.x);
+}
+{
+  // ⑯c 全通道失敗 → error 紀錄（拋錯之前就要寫進去）
+  const kv = fakeKV();
+  try { await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP, mkFetch(FULL(), [], { lineFailAll: true })); }
+  catch { /* 預期拋錯 */ }
+  const j = cardJobs(await JOBS(kv));
+  chk("全通道失敗 → jobstat 記 error", j.length === 1 && j[0].r === "error", JSON.stringify(j));
+  chk("全通道失敗 → extra 帶通道錯誤", j[0] && j[0].x.includes("line-flex"), j[0] && j[0].x);
+}
+{
+  // ⑯d 0 卡 → skip-empty 紀錄
+  const kv = fakeKV();
+  await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP,
+    mkFetch({ [URLS.baseline]: { date: TODAY, stocks: {}, subs_y: {} } }, []));
+  const j = cardJobs(await JOBS(kv));
+  chk("0 卡 → jobstat 記 skip-empty", j.length === 1 && j[0].r === "skip-empty", JSON.stringify(j));
+}
+{
+  // ⑯e 等待分支：只在窗首第一輪與窗尾第一輪取樣，中間每 5 分的輪詢不得灌爆 jobstat
+  const kv = fakeKV();
+  const env = { ...ENV_LINE, FLOW_KV: kv };
+  await pushDailyCards(env, TP, mkFetch(NOMF(), []));                                  // 22:30 窗首
+  const first = cardJobs(await JOBS(kv));
+  chk("窗首 22:30 等待 → 記 1 筆 waiting", first.length === 1 && first[0].r === "waiting", JSON.stringify(first));
+  chk("窗首 waiting → extra 帶 manifest 狀態", first[0].x.includes("manifest=缺"), first[0].x);
+  for (const m of [35, 40, 45, 50, 55]) await pushDailyCards(env, { ...TP, minute: m }, mkFetch(NOMF(), []));
+  for (const h of [23]) for (const m of [0, 5, 10, 15, 20, 25, 30, 35, 40]) {
+    await pushDailyCards(env, { ...TP, hour: h, minute: m }, mkFetch(NOMF(), []));
+  }
+  chk("中間 14 輪輪詢 → 不再新增紀錄（維持 1 筆）", cardJobs(await JOBS(kv)).length === 1,
+    JSON.stringify(await JOBS(kv)));
+  await pushDailyCards(env, TP_TAIL, mkFetch(NOMF(), []));                             // 23:45 窗尾→實推
+  const done = cardJobs(await JOBS(kv));
+  chk("窗尾 → 補上終局紀錄（waiting + pushed 共 2 筆）",
+    done.length === 2 && done[1].r === "pushed" && done[1].t === "23:45", JSON.stringify(done));
+}
+{
+  // ⑯f baseline 非今日：同樣只在窗首／窗尾取樣（否則整晚 16 輪全記）
+  const kv = fakeKV();
+  const byUrl = { ...FULL(), [URLS.baseline]: { ...FULL()[URLS.baseline], date: "2026-07-18" } };
+  const env = { ...ENV_LINE, FLOW_KV: kv };
+  await pushDailyCards(env, TP, mkFetch(byUrl, []));
+  await pushDailyCards(env, { ...TP, minute: 35 }, mkFetch(byUrl, []));
+  await pushDailyCards(env, { ...TP, minute: 40 }, mkFetch(byUrl, []));
+  const j = cardJobs(await JOBS(kv));
+  chk("baseline 非今日 → 窗首取樣 1 筆 waiting", j.length === 1 && j[0].r === "waiting", JSON.stringify(j));
+  chk("baseline 非今日 → extra 記 baseline 日期", j[0].x.includes("baseline=2026-07-18"), j[0].x);
+  await pushDailyCards(env, TP_TAIL, mkFetch(byUrl, []));
+  chk("baseline 非今日 → 窗尾再取樣 1 筆（整晚共 2 筆）", cardJobs(await JOBS(kv)).length === 2,
+    JSON.stringify(await JOBS(kv)));
+}
+{
+  // ⑯g 已推過短路 → 不記（純輪詢噪音，推播本身那筆已經在了）
+  const kv = fakeKV({ [DEDUP_KEY]: "pushed" });
+  await pushDailyCards({ ...ENV_LINE, FLOW_KV: kv }, TP, mkFetch(FULL(), []));
+  chk("already-pushed → 不進 jobstat", cardJobs(await JOBS(kv)).length === 0, JSON.stringify(await JOBS(kv)));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

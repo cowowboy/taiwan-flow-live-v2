@@ -23,8 +23,23 @@ const r1 = (v) => Math.round(v * 10) / 10;
 const r3 = (v) => Math.round(v * 1000) / 1000;
 
 // ---- FinMind ----
+// fetch 逾時（2026-08-09）：frame 班每分鐘一趟，上游一慢就可能讓單班跨越 60 秒與下一班重疊
+// ——那正是 appendSeries 亂序／重複的放大器（storeFrame 另有失敗後 sleep 1500ms 重試一次，
+// 最壞 20 + 1.5 + 20 ≈ 41.5 秒，仍在一分鐘內收斂）。
+// AbortSignal.timeout 在 workerd 與 Node 18+ 都有；不存在時退 AbortController + setTimeout，
+// 兩者都沒有（極舊 runtime）則回 undefined＝沿用舊行為（不逾時），絕不因此讓抓取整個失敗。
+export const FIN_FETCH_TIMEOUT_MS = 20000;
+export function timeoutSignal(ms = FIN_FETCH_TIMEOUT_MS) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === "undefined") return undefined;
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(new Error(`fetch timeout ${ms}ms`)), ms);
+  return ac.signal;
+}
 async function finSnapshot(token) {
-  const r = await fetch(`${FIN_SNAP}?token=${encodeURIComponent(token)}`);
+  const r = await fetch(`${FIN_SNAP}?token=${encodeURIComponent(token)}`, { signal: timeoutSignal() });
   if (!r.ok) throw new Error(`snapshot HTTP ${r.status}`);
   const j = await r.json();
   if (j.status !== 200) throw new Error(`snapshot: ${j.msg}`);
@@ -314,18 +329,92 @@ export async function recordFrameErr(env, dateISO, e) {
   } catch (e2) { console.log("recordFrameErr:", e2 && e2.message); return false; }
 }
 // series:<date> = [{t:"HH:MM", amt:市場總成交額(億), idx:加權指數值|null, chg:漲跌點|null}, ...]
-// 保留當日全部（盤中每分鐘一筆，≤270 筆，遠低於 KV 單值 25MB 上限）；同一分鐘重跑覆寫最後一筆（冪等）。
+// 保留當日全部（盤中每分鐘一筆，≤270 筆，遠低於 KV 單值 25MB 上限）；同一分鐘重跑覆寫（冪等）。
+//
+// ---- 2026-08-09：亂序／重複點修正（PROJECT_SUMMARY「appendSeries 的 lost update 競態」）----
+// 單一 key 的 get-modify-put 在 CF KV（無 CAS）下會互相覆蓋，而 hm 取自 event.scheduledTime
+// 而非實際執行時刻 → 慢班會用自己的舊標籤在較晚的牆鐘寫入。舊版冪等檢查只比對
+// arr[arr.length-1].t，亂序寫入不會被去重、而是 push 成重複點（2026-07-30 實證：11:41 排在
+// 11:40 前、兩筆 amt/idx/chg byte 全等）。lost update 本身無 CAS 救不回（漏格已被 storeFrame
+// 區塊註解接受），但**亂序與重複可以消滅**：改成以 t 為鍵對全陣列去重、put 前 sort by t。
+// 效果：seriesTail 的 .slice(-n) 末筆必為當日最新分鐘，任何「取最後一筆／相鄰差分」的消費者
+// （detectIdxEvent、build_daysummary…）不再靜默算錯。成本 O(n log n)（去重 O(n)，但 put 前的
+// out.sort 是 O(n log n)）、n≤276，零額外 KV 請求；實測 n×4 → 時間 ×3~×5（O(n²) 會是 ×16），
+// 確認非 O(n²)。此規模下 O(n) 與 O(n log n) 無實務差別（n=276 約 0.16 ms/次）。
+//
+// 同 t 衝突保留策略：**amt 較小者勝**（平手或不可比 → 後寫入者勝，沿用舊版「同分鐘重跑覆寫」）。
+// 理由（2026-08-09 獨立複核後重寫；原理由「amt 盤中單調不減」只是近似，見下）：同一標籤 t 的
+// 兩筆快照只有兩種偏差方向——
+//   ①「遲到班把較晚的累計額寫進較早的標籤」→ amt **偏高**。cron 只會準時或遲到、不會提早，
+//     這是常態偏差；取較小者＝取擷取牆鐘較早的那筆，正好消滅 amt(11:40) > amt(11:41) 的負差分。
+//   ②「FinMind 回不完整清單（status 200 但列數偏少）」→ amt **偏低**，會被 min-amt 誤判成
+//     「較早擷取」而鎖住。這是 min-amt 唯一的曝險面。
+// 13 個交易日（2026-07-20~08-07，data/intraday/）實測：①型偏差明確可觀測（見下段），
+// ②型**零觀測**（各日 frame 的 nstk 全日波動 ≤0.071%，最大一次 2796→2798）。
+// 故在現有證據上，取較小者是對的一邊；曝險面的成本是「未觀測到的風險」。
+//
+// ⚠️「amt 盤中單調不減」是近似、不是事實（2026-08-09 實測更正）：13 個交易日 3,574 組相鄰對
+// 有 **23 組（0.64%）遞減**，集中在 09:00–09:04（另一組起點在 09:40）。最差的是 2026-08-03
+// 的 amt(09:00)=25871.6 → amt(09:01)=2710（比值 0.105）。根因已查明：**開盤前 FinMind 快照回的是
+// 前一交易日的收盤殘留值**——2026-08-04 的 09:00 點 (idx 43386.41, chg 266.66) 與 2026-08-03
+// 的 13:35 收盤點 **byte 完全相同**。亦即 amt **會偏高、不只會偏低**，而 min-amt 在這類異常上
+// 正好選對（挑掉殘留值、留下真正的開盤累計額）。
+//
+// ❌ 為什麼不改用 FinMind 自己的時戳（ts）去重（2026-08-09 評估後否決，記錄於此以免再試）：
+// storeFrame 已算出 ts（`String(r.date)`，分鐘解析度），存進 point 後同 t 取 ts 較早者，
+// 表面上比 amt 這個代理更直接地量測「哪筆擷取較早」。實測三項否決理由——
+//   (a)**開盤殘留值的 ts 反而更早**：2026-08-09（休市日）實打 /live 得 ts="2026-08-09 08:30:00"，
+//      而內容是 08-07 的收盤值（idx 44225.91／chg -170.79 ＝ 08-07 的 13:35 點）。亦即殘留快照帶的
+//      是「當日 08:30」的盤前時戳，比任何盤中新鮮快照都早 → 「取 ts 較早者」會在上段那三個開盤
+//      異常案例上**全部選錯**，與被推翻的 0.5 下限犯完全同一個錯。
+//   (b)**ts 會停滯**：2026-07-29 的 09:01/09:02/09:03 三筆 amt/idx/chg byte 全等（上游時戳凍結），
+//      此時兩筆 ts 相等 → 退回「後寫入者勝」，等於沒有策略。13 個交易日的 frame 有 **95.7%
+//      （672/702）** 被標 stale（ts 與牆鐘差 >3 分），落後量並非常數，「相對比較不受 stale 影響」
+//      這個推論不成立。
+//   (c) 本檔上方 `f:<date>:<hm>` 的 key 設計註解已載明：**舊制就是拿 FinMind 時戳當 key**，
+//      07-16/17 上游時戳停滯時當日格數塌縮，才改成牆鐘 key。拿 ts 去重＝把當初刻意逃離的
+//      失效模式請回來。
+//
+// 順序相依性（2026-08-09 移除下限後重新測量）：min-amt 是 min 歸約（可交換、可結合），
+// **同一個 t 不論累積幾筆，只要 amt 皆為有限值且兩兩相異，結果就與寫入順序無關**
+// （n=3／n=4 各 20000 組隨機相異值、窮舉全部排列，零發散）。這比帶 0.5 下限的版本**嚴格更好**：
+// 下限是成對比較、不滿足結合律，同一批測量得 n=3 有 **12.46%**、n=4 有 **27.79%** 的組合會因
+// 寫入順序收斂到不同結果（並非罕見邊角）。**只有平手或不可比時才依賴寫入順序**（後寫入者勝，
+// 沿用舊版冪等），該類配對按定義必然發散；其在隨機樣本中的佔比完全由取樣分佈決定——原記錄的
+// 「約 2%」與「約 5%」是兩次不同取樣的產物、不是同一個量的兩個估計，故不再記任何百分比。
+//
+// 已知曝險（誠實揭露，皆為既有狀況、非本批引入，不修）：
+//   - `num()` 對非數值字串回 NaN → 走「不可比」分支（後寫入者勝）。
+//   - 但 `Number(null)`／`Number("")`／`Number(0)` 皆為**有限的 0**，會走正常比較並以最小值勝出
+//     → amt 為 null/""/0 的壞點會鎖住該分鐘。**只有 key 根本不存在（undefined → NaN）才真的不可比**。
+//   - `storeFrame` 對「FinMind 回不完整清單」本來就毫無守門：`nStocks` 只在回傳值裡報告、不擋任何東西。
+function pickSeriesDup(oldP, newP) {
+  const a = Number(oldP && oldP.amt), b = Number(newP && newP.amt);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) return newP;   // 平手／不可比 → 後寫者勝
+  return a < b ? oldP : newP;   // 純 min-amt：比較對稱且為 min 歸約 → 與寫入順序無關（含三筆以上）
+}
+// 全陣列以 t 去重＋依 t 排序（"HH:MM" 定寬字串，字典序＝時序）。點可為 null/壞資料 → 直接濾掉。
+// 也會就地清理舊版程式留下的既有亂序／重複（下一次 append 即自癒）。
+export function mergeSeriesPoint(arr, point) {
+  const out = [], at = new Map();   // t → out 內的索引
+  for (const p of [...(Array.isArray(arr) ? arr : []), point]) {
+    if (!p || typeof p.t !== "string") continue;
+    const i = at.get(p.t);
+    if (i === undefined) { at.set(p.t, out.length); out.push(p); continue; }
+    out[i] = pickSeriesDup(out[i], p);
+  }
+  out.sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+  return out;
+}
 export async function appendSeries(env, d, hm, mktAmtRaw, idxRow) {
   const key = `series:${d}`;
-  const arr = (await env.FLOW_KV.get(key, "json")) || [];
   const point = {
     t: hm,
     amt: r1(mktAmtRaw / 1e8),
     idx: idxRow ? orNull(idxRow.close) : null,
     chg: idxRow ? orNull(idxRow.change_price) : null,
   };
-  if (arr.length && arr[arr.length - 1].t === hm) arr[arr.length - 1] = point;
-  else arr.push(point);
+  const arr = mergeSeriesPoint(await env.FLOW_KV.get(key, "json"), point);
   await env.FLOW_KV.put(key, JSON.stringify(arr), { expirationTtl: 172800 });
   return arr;
 }
@@ -1088,6 +1177,38 @@ export async function runAetf2(env, tp, fetchFn = fetch, opts = {}) {
     return { name: "aetf2", error: String((e && e.message) || e) };
   }
 }
+// ---- 盤後圖卡 PNG 渲染主觸發（2026-08-09；修正「圖卡推播時序錯位」）----
+// 問題：.github/workflows/cards.yml 的 cron 是台北 22:12，但 GitHub schedule 實測延遲
+//   54 分~2 小時 25 分（PROJECT_SUMMARY「Worker 升格全系統主排程」待改進①），渲染常跨午夜
+//   才完成 → manifest.date 永遠不是推播當下的台北日 → attachCardImages／longformImage 一律
+//   回 0 張／null。**據外部證據 PNG hero 與長文圖從未真正掛上過任何一次 LINE 推播。**
+// 修法：比照其他班由 Worker 主動 workflow_dispatch，GH cron 留兜底（不變式：一條不刪）。
+// 時點取台北 22:00 而非 21:50：aetf2 在 21:45 才 dispatch aetf.yml，它要幾分鐘才把
+//   data/aetf/diff.json push 上來；21:50 渲染會把昨日的主動ETF 數字燒進 PNG（manifest.date
+//   取 baseline.date＝今日，守門攔不到這種「當日 manifest 裝舊數字」）。22:00 起跑、渲染實測
+//   約 5 分鐘，對 22:30 的推播窗仍有約 25 分餘裕；真的遲到還有 pushDailyCards 的等待邏輯兜底。
+// 冪等：KV bkfired:<date>:cardsrender（沿用 runAetf2 的鍵與值格式），每日至多 dispatch 一次；
+//   失敗不寫鍵 → 下一輪（5 分後）自動重試。
+export const CARDS_RENDER_AFTER_MIN = 22 * 60;
+export async function runCardsRender(env, tp, fetchFn = fetch, opts = {}) {
+  if (tp.hour * 60 + tp.minute < CARDS_RENDER_AFTER_MIN) return { name: "cards-render", waiting: "before-22:00" };
+  const key = bkfiredKey(tp.date, "cardsrender");
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "cards-render", skipped: "already-fired" };
+  if (opts.dry) return { name: "cards-render", wouldDispatch: true };
+  try {
+    await ghDispatchWithRetry(env, "taiwan-flow-live-v2", "cards.yml", fetchFn, opts.sleepFn || sleep);
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", 1), { expirationTtl: BKFIRED_TTL });
+    console.log("cards-render: 圖卡渲染 dispatched");
+    await recordJob(env, tp, "cards-render", "fired");
+    return { name: "cards-render", fired: true };
+  } catch (e) {
+    console.log("cards-render dispatch:", e && e.message);
+    await recordJob(env, tp, "cards-render", "error", String((e && e.message) || e));
+    await alertJob(env, tp, "cards-render-err",
+      `❌ 圖卡渲染 dispatch 失敗：${String((e && e.message) || e)}（GH 22:12 兜底 cron 仍會跑）`, fetchFn);
+    return { name: "cards-render", error: String((e && e.message) || e) };
+  }
+}
 // 晚場協調班（台北 21:00–23:55 每 5 分喚醒）：每醒依序 pm summary → diag 鏈 → mktbal 鏈
 // → aetf2。各步獨立 try/catch＋各自冪等；同一次喚醒共用產物快取（postmkt.json 2.4MB，
 // summary 三源與 diag dep 都要看，只抓一次）。交易日守門一次做在最前（series）。
@@ -1108,6 +1229,10 @@ export async function runEvening(env, tp, fetchFn = fetch, opts = {}) {
   }
   try { out.aetf2 = await runAetf2(env, tp, fetchFn, opts); }
   catch (e) { out.aetf2 = { error: String((e && e.message) || e) }; }
+  // 圖卡 PNG 渲染主觸發（台北 22:00，見 runCardsRender）：必須排在 pushDailyCards 之前，
+  // 讓當晚的 manifest 有機會在 22:30 推播窗開啟前落地。整步 try/catch，失敗不影響推播。
+  try { out.cardsRender = await runCardsRender(env, tp, fetchFn, opts); }
+  catch (e) { out.cardsRender = { error: String((e && e.message) || e) }; }
   // Phase B2 附加步驟：盤後圖卡推播（pushDailyCards 內建 台北≥22:30 時間守門＋KV 去重＋
   // baseline 交易日守門；21:00–22:25 的喚醒零成本略過）。整步 try/catch——失敗只告警
   // （tag cards-err，勿與去重鍵 alerted:<date>:cards 同名相撞），絕不影響上面既有 evening 鏈。
@@ -1975,6 +2100,9 @@ export function buildDailyCards(src) {
 // 發送失敗不寫 KV → 下一輪（5 分後）自動重試，同 sentinel 慣例。
 const FLOWS_RAW_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main";
 export const CARDS_PUSH_AFTER_MIN = 22 * 60 + 30;   // 台北 22:30（規格 9.1.1 推播窗下緣）
+// 等 manifest 的截止時刻（2026-08-09）：到此仍非當日 manifest 就放棄等待、退純文字推出去。
+// 取 23:45 而非 23:55——晚場班 cron 到 23:55，留 23:45/23:50/23:55 三輪讓推播本身還有重試機會。
+export const CARDS_WAIT_UNTIL_MIN = 23 * 60 + 45;
 // LINE text message 官方上限 5000 字（messaging-api reference #text-message）；
 // 33 卡純文字降級版可能貼近上限，保守截 4900 保整則可發（截尾勝於整則 400 不發）
 const CARDS_TEXT_MAX = 4900;
@@ -2077,8 +2205,23 @@ export function longformImage(manifest, dateISO) {
 }
 
 export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
+  const nowMin = tp.hour * 60 + tp.minute;
+  // 觀測取樣（2026-08-09，修正 C）：pushDailyCards 原本完全沒呼叫 recordJob，/jobs?date= 與
+  // /health?slot=eve 都查不到當晚推播結局。但晚場班每 5 分醒一次，非終局分支全記會變輪詢噪音
+  // （違反 recordJob「只記狀態轉換」的慣例）→ 只在**窗首第一輪**與**窗尾第一輪**各取樣一次：
+  // 窗首那筆說明「22:30 當下 manifest／baseline 是什麼狀態」（判斷時序有沒有修好的依據），
+  // 窗尾那筆保證「等到最後仍推不出去」不會靜默無紀錄。終局（pushed／skip-empty／error）一律記。
+  //
+  // 兩個等待分支實際取樣到的輪次不同（2026-08-09 複驗，逐分鐘窮舉 0~1439 驗證）：
+  // - ④ baseline 等待分支沒有窗尾截止條件 → **窗首（22:30~22:34）與窗尾（23:45~23:49）都會記**。
+  // - ⑥b manifest 等待分支的進入條件是 `nowMin < CARDS_WAIT_UNTIL_MIN`，與窗尾取樣條件
+  //   `nowMin >= CARDS_WAIT_UNTIL_MIN` **互斥** → 它的窗尾取樣是不可達分支，**只會在窗首記**。
+  //   這不是缺陷：manifest 等到窗尾就不再走等待分支，而是往下走完整推播並記終局 `pushed`
+  //   （或 error），觀測不會留白。
+  const sampleTick = (nowMin >= CARDS_PUSH_AFTER_MIN && nowMin < CARDS_PUSH_AFTER_MIN + 5)
+    || (nowMin >= CARDS_WAIT_UNTIL_MIN && nowMin < CARDS_WAIT_UNTIL_MIN + 5);
   // ① 時間守門：evening 班 21:00 起每 5 分醒，22:30 前一律不動作（零 fetch 零 KV 讀）
-  if (tp.hour * 60 + tp.minute < CARDS_PUSH_AFTER_MIN) return { name: "cards", waiting: "before-22:30" };
+  if (nowMin < CARDS_PUSH_AFTER_MIN) return { name: "cards", waiting: "before-22:30" };
   // ② 通道守門：兩通道皆未設 → 靜默（同 sendAlert 慣例，不打任何外部請求）
   const hasLine = !!(env.LINE_TOKEN && env.LINE_USER_ID);
   if (!hasLine && !env.ALERT_WEBHOOK) return { name: "cards", skipped: "no-channel" };
@@ -2088,9 +2231,11 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   // ④ 抓源＋交易日守門：baseline 週末/假日不更新，date 非台北今日即自然跳過。
   //    不寫 KV——交易日 baseline 若只是遲到，下輪 5 分後再看（23:55 窗尾自然截止）
   const src = await fetchCardSources(env, tp, fetchFn, opts);
-  if (!src.baseline || String(src.baseline.date || "").slice(0, 10) !== tp.date)
-    return { name: "cards", skipped: "baseline-not-today",
-      baselineDate: src.baseline ? String(src.baseline.date || "") : null };
+  if (!src.baseline || String(src.baseline.date || "").slice(0, 10) !== tp.date) {
+    const baselineDate = src.baseline ? String(src.baseline.date || "") : null;
+    if (sampleTick) await recordJob(env, tp, "cards", "waiting", `baseline=${baselineDate || "缺"}`);
+    return { name: "cards", skipped: "baseline-not-today", baselineDate };
+  }
   // ⑤ 組卡＋縱深防禦：buildDailyCards 產物理論上已乾淨，這裡逐卡再過 assertCardAllowed
   //    一次——過不了的整張剔除記 log，不擋其他卡（規格 9.3 發送層驗收條件）
   const built = buildDailyCards(src);
@@ -2113,14 +2258,37 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   //    只影響 Flex 版型（cardBubble 對有 img 卡出 hero）；fallback 純文字不受影響——
   //    卡物件保留 rows/paras 原資料，數字版內容兩條路徑一致。
   const imgs = attachCardImages(cards, src.manifest, tp.date);
-  if (opts.dry) return { name: "cards", wouldPush: cards.length,
-    skippedCards: built.skipped.length, dropped: dropped.length, imgs,
-    longform: lf ? "attached" : (hasLongform ? "no-image" : "no-card") };
+  const manifestDate = String((src.manifest || {}).date || "").slice(0, 10);
+  const manifestReady = !!manifestDate && manifestDate === tp.date;
+  if (opts.dry) {
+    const out = { name: "cards", wouldPush: cards.length,
+      skippedCards: built.skipped.length, dropped: dropped.length, imgs,
+      longform: lf ? "attached" : (hasLongform ? "no-image" : "no-card") };
+    if (!manifestReady) out.manifestDate = manifestDate || null;
+    if (!manifestReady && nowMin < CARDS_WAIT_UNTIL_MIN) out.waiting = "manifest-not-today";
+    return out;
+  }
   // ⑥ 0 卡不推：寫 KV 記 skip 後短路（0 卡之夜後續喚醒不再白抓 13 支）
+  //    排在等待邏輯之前——0 卡之夜等 manifest 也沒有意義（沒有卡可以掛圖）
   if (!cards.length) {
     if (env.FLOW_KV) await env.FLOW_KV.put(key, "skip-empty", { expirationTtl: ALERTED_TTL });
+    await recordJob(env, tp, "cards", "skip-empty",
+      `skipped=${built.skipped.length} dropped=${dropped.length}`);
     return { name: "cards", skipped: "no-cards",
       skippedCards: built.skipped.length, dropped: dropped.length };
+  }
+  // ⑥b manifest 非當日 → 先不推、**也不寫 KV 去重鍵**，等下一輪（2026-08-09 修正 B）
+  //    舊行為：22:30 一到就用「還是昨天的 manifest」推出去、任一通道成功即寫去重鍵短路整晚，
+  //    等到 23:0x 圖真的渲染好時已經沒有第二次機會 → PNG hero 與長文圖從未掛上過推播。
+  //    新行為：manifest 不是今日就純粹等（零副作用，下一輪 5 分後再看）；等到窗尾
+  //    CARDS_WAIT_UNTIL_MIN（台北 23:45）仍沒等到，才照舊退純文字推出去——晚場班窗到 23:55，
+  //    窗尾之後還有 23:45/23:50/23:55 三輪機會，單輪推播失敗仍能重試。
+  //    注意：這裡不寫 KV 是安全的——真的一整晚都沒等到，窗尾那輪會走完整推播流程並寫鍵。
+  if (!manifestReady && nowMin < CARDS_WAIT_UNTIL_MIN) {
+    if (sampleTick) await recordJob(env, tp, "cards", "waiting",
+      `manifest=${manifestDate || "缺"} cards=${cards.length}`);
+    return { name: "cards", waiting: "manifest-not-today",
+      manifestDate: manifestDate || null, cards: cards.length };
   }
   // ⑦ 發送：LINE Flex → 建構或推送拋錯退 cardsFallbackText 純文字再試一次（規格 5.3：
   //    不可因版型錯誤整則不發）；webhook 通道固定送純文字版（Flex 只有 LINE 認得）
@@ -2159,7 +2327,10 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
   // ⑧ 全通道失敗 → 拋錯、不寫 KV（下輪重試）。任一成功即寫 KV——單鍵去重下不寫的話，
   //    已成功的通道下輪會重複推（LINE 一晚一推是硬約束）；代價是失敗的次要通道當晚
   //    不再補送，errors 帶回結果供 jobstat/告警查。
-  if (!sentVia.length) throw new Error(`圖卡推播全通道失敗：${errs.join("；")}`);
+  if (!sentVia.length) {
+    await recordJob(env, tp, "cards", "error", errs.join("；").slice(0, 300));
+    throw new Error(`圖卡推播全通道失敗：${errs.join("；")}`);
+  }
   // LINE 是主要交付通道：只剩 webhook 成功時 KV 仍會寫（一晚一推硬約束），
   // LINE 當晚不補推——但不得靜默，補一發告警讓使用者知道主通道失守（B2 驗收建議）
   if (!sentVia.some((v) => v.startsWith("line")))
@@ -2170,6 +2341,13 @@ export async function pushDailyCards(env, tp, fetchFn = fetch, opts = {}) {
     skippedCards: built.skipped.length, imgs };
   if (dropped.length) out.dropped = dropped.length;
   if (errs.length) out.errors = errs;
+  if (!manifestReady) out.manifestDate = manifestDate || null;   // 窗尾退純文字時留下佐證
+  // 終局紀錄（修正 C）：走哪個分支、掛了幾張圖、長文圖有無掛上，都要能事後從 /jobs 查到。
+  // 欄位慣例同其他呼叫點：result 為短狀態字串、extra 為單行細節。
+  await recordJob(env, tp, "cards", "pushed",
+    `via=${sentVia.join("+")} cards=${cards.length} imgs=${imgs} `
+    + `lf=${lf ? "attached" : (hasLongform ? "no-image" : "no-card")} `
+    + `manifest=${manifestReady ? "today" : (manifestDate || "缺")}`);
   return out;
 }
 

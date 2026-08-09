@@ -106,8 +106,24 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 
 密鑰全走 `wrangler secret put`、不寫檔：`FINMIND_TOKEN`、`GH_DISPATCH_TOKEN`
-（fine-grained PAT，對 taiwan-flows／postmkt／taiwan-stock-news 三 repo Actions 讀寫）、
-`ALERT_WEBHOOK`、`LINE_TOKEN`、`LINE_USER_ID`。
+（fine-grained PAT，對 **taiwan-flows／postmkt／taiwan-stock-news ＋本 repo taiwan-flow-live-v2
+四個 repo** Actions 讀寫）、`ALERT_WEBHOOK`、`LINE_TOKEN`、`LINE_USER_ID`。
+
+> **2026-08-09 更正**：本段原寫「對 taiwan-flows／postmkt／taiwan-stock-news **三** repo」，
+> 漏了本 repo。**依據是程式碼與 2026-07-22 線上實測記載的「推論」，不是直接驗證**
+> （直接證據是 GitHub run 歷史顯示 dispatch 回 204，本機無 `gh` CLI 也無憑證，查不到）：
+> `worker/src/index.js` 有多處對本 repo 的 dispatch 前例——
+> `const MORNING_REPO` 值即 `taiwan-flow-live-v2`（dispatch `morning.yml`）、
+> `export function backupPipelines` 內 daysummary／aetf／baseline／us／intraday 五條的 `repo`
+> 皆為 `taiwan-flow-live-v2`、`async function runAetf2` 與 `export async function runCardsRender`
+> 直接以字面量 `"taiwan-flow-live-v2"` 呼叫 `async function ghDispatchWithRetry`，全部走同一支
+> `env.GH_DISPATCH_TOKEN`。而 `PROJECT_SUMMARY.md`「Worker 升格全系統主排程」段記載 2026-07-22
+> 首日實測「全班 workflow_dispatch 主觸發準點、conclusion 全 success」——token 若不含本 repo，
+> 這些班會全數 HTTP 404/403 並走 `async function ghDispatch` 的 throw 分支。
+> 結論方向不變：**「原本只有三個 repo」明確不成立，本 repo 權限早已具備，只是文件沒跟上**。
+> **真正的直接驗證要等第一次 `cards.yml` dispatch 回 204**（`export async function runCardsRender`
+> 上線後的第一個交易日晚上，`npx wrangler tail` 或 GitHub run 歷史看得到）。
+> `worker/wrangler.toml` 的 Secrets 註解同批更正。
 
 ## 已知限制／坑
 

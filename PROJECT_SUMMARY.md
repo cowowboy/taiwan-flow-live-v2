@@ -90,15 +90,27 @@
         frame 的比例」，只看有沒有 frame、不看金額。同一天數值一致（命中的時點 `total[i]` 是
         全市場累積成交額、實務上不可能為 0），但這是**巧合而非定義相同**，日後若改 `total`
         的補值邏輯（例如缺格改補 `0` 而非 `None`）要三支一起看。
-      - **待決事項**：既有的 `data/intraday/2026-07-18.json` 殘檔**仍在 repo 裡**——本次只擋未來、
-        **沒刪舊檔**（下游本來就會用 `MIN_COVER` 剔除它，故無害）。要不要刪**尚未決定**。
+      - **✅ 已刪除（2026-08-09，使用者核可後 `git rm`）**：守門那批改動**只擋未來、沒刪舊檔**，
+        故當時 `data/intraday/2026-07-18.json` 殘檔仍留在 repo 裡（下游本來就會用 `MIN_COVER`
+        剔除它，故無害，也因此是「可刪可不刪」而非必修）。後續判定「留著只會讓每個接手的人
+        重問一次它是什麼」，遂刪除。**刪除前確認三件事（皆已驗證）**：
+        ① **確實只有它該被剔除**——覆蓋率 1/54＝1.9%，且 2026-07-18 **確實是星期六**；
+        該目錄當時 14 檔中它是**唯一**低於 `MIN_COVER` 門檻的（其餘 13 檔全 54/54）。
+        ② **全 repo 沒有任何程式指名讀取該檔**——提及該日期字串的 16 個檔案全是註解或日期字面量；
+        唯一看似相關的 `backtest/test_rrg_smoke.py` 實際是在 `TemporaryDirectory` 裡**自建同名合成檔**
+        並 monkey-patch `rr.INTRADAY` 指向該暫存目錄，**不碰 repo 內的檔**。
+        ③ **刪除後下游行為不變**——`src/build_rrg_base.py` 與 `backtest/run_rrg.py` 皆正常執行；
+        `data/rrg_base.json` 除 `generated_at` 外 **byte-identical**；回測樣本仍是 **13 個交易日**
+        （2026-07-20~2026-08-07）。`backtest/report_rrg.md` 已重跑重產，唯一變動是開頭那行
+        「剔除的殘檔（時點覆蓋率 < 90%）」通知消失，其餘所有數字一字未動——**反向印證了
+        「它本來就被 `MIN_COVER` 剔除、從未進過樣本」**。
     - **全目錄掃描（已驗證，14 檔）**：除 07-18（1/54＝1.9%）外，其餘 **13 檔全部 54/54＝100%**，
       **沒有第二個殘檔**。缺席的交易日只有 07-24、07-31（CF cron dow bug，frame 樣本永久遺失，已結案）；
       07-26 週日死資料已由 commit `220adca` 刪除。**實際可用回測樣本＝13 個交易日**。
     - 註：下方「7a 盤中歸檔＋權重月更」段其實早已記過「2026-07-18.json 是週六 stale 資料」，
       只是本段的「順帶發現」條目當時沒連到它。
 
-- **🟡 已知未修：`appendSeries` 的 lost update 競態（2026-08-09 追查「07-30 series 少 1 筆」時發現）**：
+- **✅ 已修（2026-08-09，尚未部署）：`appendSeries` 的 lost update 競態（同日追查「07-30 series 少 1 筆」時發現）**：
   單一 KV key 做 get-modify-put、CF KV 無 CAS，每分鐘一班的 frame cron 互相覆蓋。
   **這是既有取捨的延伸、不是同一件事**——`storeFrame` 區塊註解明文接受的是「**單筆漏格**不影響判讀」，
   **亂序與重複點並不在被接受的範圍內**。
@@ -110,7 +122,8 @@
     `"* 1-5 * * 2-6"` 每分鐘一班，而 `hm` 取自 `event.scheduledTime`（`export async function storeFrame`
     內的 `taipeiParts(new Date(scheduledTime ...))`）**而非實際執行時間**，慢班會用自己的標籤
     在較晚的牆鐘時刻寫入。放大器：`storeFrame` 內 `snap()` 失敗會 sleep 1500ms 重試一次，
-    且 `async function finSnapshot` 的 `fetch` **沒有 timeout**（純 `fetch`，無 AbortSignal）。
+    且 `async function finSnapshot` 的 `fetch` **當時沒有 timeout**（純 `fetch`，無 AbortSignal）
+    ——此點已於本次修正（見下方「修法（已實作）」）。
   - **還原劇本（推論，非已驗證；有三項證據支持）**：11:39 班讀到 `[…11:38]` 後 put；11:41 班也讀到
     `[…11:38]`（讀在 11:39 落地前）後 put，**蓋掉 11:39**；11:40 班最慢，讀到 `[…11:38, 11:41]`
     後 append 11:40，造成非遞增。支持證據：① 漏格與逆轉落在同一個 3 分鐘窗；② 11:40／11:41 值全等
@@ -127,9 +140,94 @@
   - **殘留風險（現在式，既有理由涵蓋不到）**：漏格無害成立，但**亂序與重複點**會讓
     `export function seriesTail` 的 `.slice(-n)`（n=60）**末筆不是最新的一分鐘**；且任何未來對
     `series` 做「取最後一筆」或「相鄰差分」的消費者都會**靜默算錯**，不會拋錯。
-  - **狀態：已另立背景任務處理，尚未實作**。建議修法：把 `appendSeries`「只比對最後一筆」改成
-    「**以 `t` 為鍵對全陣列去重、put 前 sort by t**」，約 3 行、零額外 KV 成本；次要項是給
-    `finSnapshot` 加 fetch timeout。**不建議改 Durable Object**——成本遠高於收益。
+  - **修法（已實作，2026-08-09；皆在 `worker/src/index.js`，尚未部署）**：
+    - 新增 `export function mergeSeriesPoint` 與 `function pickSeriesDup`；
+      `export async function appendSeries` 原本「只比對最後一筆」的三行 push／覆寫，
+      改成一行 `mergeSeriesPoint(...)`——**以 `t` 為鍵對全陣列去重、put 前 sort by t**。
+      成本 **O(n log n)**（去重掃描是 O(n)，但 put 前的 `out.sort` 是 O(n log n)——原記錄寫 O(n)
+      不精確，2026-08-09 更正）、n≤276、**零額外 KV 請求**；實測 n×4 → 時間 **×3~×5**
+      （兩次獨立量測分別得 ×3.01 與 ×4.88；O(n²) 會是 ×16）→ **已排除 O(n²)**。
+      此規模下 O(n) 與 O(n log n) 無實務差別（n=276 約 0.16 ms/次）。
+      **不採 Durable Object**（成本遠高於收益，維持原判斷）。
+    - **自癒**：KV 內既有的亂序／重複點在**下一次 append 就會被清乾淨**，不需另跑修補腳本。
+    - **同 `t` 重複的保留策略：純 min-amt——保留 `amt` 較小者**；平手或不可比 → 後寫入者勝
+      （沿用舊版「同分鐘重跑覆寫」的冪等）。理由（**2026-08-09 獨立複核後重寫，見下方「複核推翻」段**）：
+      `hm` 取自 `event.scheduledTime`、**cron 只會遲到不會提早**，所以同一標籤的兩筆中
+      `amt` 較小者＝擷取牆鐘較早＝離標籤分鐘最近。若讓後寫入者勝，遲到班會把較晚的累計額
+      寫進較早的標籤，做出**負差分**——正是本條要消滅的靜默錯誤。
+      ⚠️ 此理由**不預設**「`amt` 盤中單調不減」（該敘述已被實測推翻，見下）。
+    - **順序相依性（2026-08-09 移除下限後重新測量）**：`pickSeriesDup` 現在是純粹的 min 歸約
+      （可交換、可結合），所以**同一個 `t` 不論累積幾筆，只要 `amt` 皆為有限值且兩兩相異，
+      結果就與寫入順序無關**——n=2/3/4 各 3000 組隨機相異值、**窮舉全部 n! 種寫入排列零發散**
+      （測試在 `worker/test/series.mjs`）。這比帶 0.5 下限的舊版**嚴格更好**：下限是成對比較、
+      不滿足結合律，同一批測量得 **n=3 有 12.46%、n=4 有 27.79%** 的組合會因寫入順序收斂到
+      不同結果（複核者量得 12.18%／28.55%，同量級）——那**不是罕見邊角**，是常態。
+      **只有平手或不可比時才依賴寫入順序**（後寫入者勝，沿用舊版冪等），該類配對按定義必然發散。
+      原記錄的「約 2%」與程式註解的「約 5%」**是兩次不同取樣的產物、不是同一個量的兩個估計**
+      （發散率完全由取樣分佈中平手的佔比決定），故本次一併刪除、不再記任何百分比。
+    - 次要項一併做掉：新增 `export const FIN_FETCH_TIMEOUT_MS` 與 `export function timeoutSignal`，
+      `async function finSnapshot` 的 fetch 帶 timeout（`AbortSignal.timeout` → `AbortController`
+      → `undefined` 三層降級）。最壞路徑 20 + 1.5 + 20 ≈ **41.5 秒，收斂在一分鐘內**；
+      `storeFrame` 的 `snap()` 失敗 → sleep → 重試一次的路徑**未動**。
+  - **❌ 複核推翻：0.5 合理性下限已移除（2026-08-09，獨立複核者以 13 個交易日實測推翻，已照辦）**
+    本段之前記載的緩解是「新增 `export const SERIES_TRUNC_RATIO`＝0.5，只有在較小者仍達較大者
+    的 0.5 倍時才偏好較小者，低於此視為截斷快照改取較大者」。**該設計已整段刪除**，
+    `function pickSeriesDup` 回到純 min-amt。推翻依據（**全部已由本次實跑複驗**）：
+    - **① 下限的成本效益是負的**：它要防的「FinMind 回不完整清單 → `amt` 偏低被鎖住」在 13 個
+      交易日內**零觀測**（各日 frame 的 `nstk` 全日波動 ≤ **0.071%**，最大一次 2796→2798）；
+      代價卻是在 **3/13 個交易日（23%）觀測得到的開盤異常上確定性地選錯**。實跑驗證：
+      純 min-amt 這三例全對，加下限後全錯（見下方測試段的反證輸出）。
+    - **② `amt` 盤中並非單調不減——這是 min-amt 原理由的前提，但只是近似**：13 個交易日
+      **3,574 組相鄰對有 23 組（0.64%）遞減**，集中在 09:00–09:04（另有一組起點 09:40）。
+      最差 `amt(09:00)=25871.6 → amt(09:01)=2710`（比值 **0.105**）。
+      **根因已查明（新證據）**：開盤前 FinMind 快照回的是**前一交易日的收盤殘留值**——
+      `data/intraday/2026-08-04.json` 的 09:00 點 `(idx 43386.41, chg 266.66)` 與
+      `2026-08-03.json` 的 13:35 收盤點**byte 完全相同**。亦即 **`amt` 會偏高、不只會偏低**；
+      而 min-amt 在這類異常上**正好選對**（挑掉殘留值、留下真正的開盤累計額）。
+    - **③ 原記錄的「實測下界 0.618」是錯的**：該表**靜默排除了 `t=09:00`**，導致下界被高估。
+      重測（含 09:00）正確值：**k=1 分 0.690、k=2 分 0.672、k=3 分 0.600、k=4 分 0.541、
+      k=5 分 0.518、k=6 分 0.473**——**k=6 已跌破 0.5 門檻**，下限本身就站不住。
+      `PROJECT_SUMMARY.md`／`worker/src/index.js`／`worker/test/series.mjs` 三處的 0.618 已全部移除。
+    - **原「殘餘風險 (c)」的敘述是錯的**（複核者指出）：它寫「誤判時只是退回舊版『取較大者』
+      的行為」，但**舊版是後寫入者勝、不是取較大者**。該下限既已移除，此段連同 (a)(b) 一併作廢。
+  - **未改用 FinMind 時戳（`ts`）去重——評估後否決（2026-08-09，記錄於此以免再試）**：
+    `export async function storeFrame` 已算出 `ts`（`String(r.date)`，分鐘解析度），把它存進
+    series point、同 `t` 取 `ts` 較早者，表面上比 `amt` 這個代理更直接量測「哪筆擷取較早」。
+    可行性確認的結論是**否決**，三項理由：
+    - **(a) 致命：盤前殘留值的 `ts` 反而更早** → 「取 `ts` 較早者」會在上述三個開盤異常案例上
+      **全部選錯**，與被推翻的 0.5 下限犯完全同一個錯。**直接證據**：2026-08-09（休市日）實打
+      線上 `/live` 得 `ts="2026-08-09 08:30:00.000000"`，而其內容是 08-07 的收盤值
+      （`idx 44225.91`／`chg -170.79` ＝ `data/intraday/2026-08-07.json` 的 13:35 點）。
+      亦即殘留快照帶的是「**當日 08:30**」的盤前時戳，比任何盤中新鮮快照都早。
+    - **(b) 「相對比較不受 stale 影響」這個推論不成立**：13 個交易日的 frame 有 **95.7%
+      （672/702）** 被標 stale（`ts` 與牆鐘差 >3 分），且落後量**並非常數**——`ts` 會**停滯**：
+      `2026-07-29` 的 09:01/09:02/09:03 三筆 `amt`/`idx`/`chg` byte 全等（上游時戳凍結），
+      此時兩筆 `ts` 相等 → 退回「後寫入者勝」，等於沒有策略。
+    - **(c) 架構上是走回頭路**：`worker/src/index.js` 的 `f:<date>:<hm>` key 設計註解已載明，
+      **舊制就是拿 FinMind 時戳當 key**，07-16/17 上游時戳停滯時當日格數塌縮，才改成牆鐘 key。
+      拿 `ts` 去重＝把當初刻意逃離的失效模式請回來。
+    - **附帶發現（阻礙未來複驗，未修）**：`src/archive_intraday.py` 的 `frames_meta` 只存
+      `{t, stale}`、`series` 也沒有 `ts` 欄，**歷史 `ts` 完全不可回溯**；KV frame TTL 僅 2 天，
+      本次查證時 08-07 的 frame 已過期。要再評估任何以 `ts` 為基礎的策略，得先歸檔 `src_ts`。
+  - **測試（`worker/test/series.mjs`，47 → 59 項）**：移除綁定 0.5 下限的整組斷言，新增
+    ①**三個真實開盤異常案例當 fixture**（2026-08-03 09:00 比值 0.105、2026-08-04 09:00 比值 0.124、
+    2026-07-29 09:03 比值 0.315），斷言取到開盤真值且**兩種寫入順序結果相同**；
+    ②防迴歸：舊門檻兩側四個比值（0.5／0.4999／0.1／0.473）一律取較小者、且原始碼已無
+    `SERIES_TRUNC_RATIO`；③可交換性 n=2/3/4 窮舉全排列零發散；④平手 → 後寫入者勝；
+    ⑤`amt` 為 `null`/`""`/`0` 的實際行為（見下）。
+    **已做反證**：暫時還原 0.5 下限，新測試 **15 項轉紅（44/15）**，還原回來後 **59/0 全綠**。
+  - **三件既有狀況（非本批引入，僅記錄不修）**：
+    - `export async function storeFrame` 對「FinMind 回不完整清單」**本來就毫無守門**：
+      `nStocks` 只在回傳值裡報告、**不擋任何東西**。不完整快照會正常寫進當分鐘的 frame。
+    - `function num` 對非數值字串回 `NaN` → `pickSeriesDup` 走「不可比 → 後寫入者勝」
+      → **壞點會覆蓋好點**。舊版行為相同（同分鐘重跑一律覆寫），**非退化**。
+    - **「缺欄＝不可比」的舊敘述不精確**（複核者指出，已更正）：`Number(null)`／`Number("")`／
+      `Number(0)` 皆為**有限的 0**，會走正常比較並**以最小值勝出**（＝壞點鎖住該分鐘）；
+      **只有 `amt` 這個 key 根本不存在（`undefined` → `NaN`）才真的走不可比分支**。
+      兩種行為都已在測試中釘住。
+      **未解／待議**：`amt <= 0` 是否該一併視為不可比（可擋掉「FinMind 回空清單 → `mktAmt=0`」
+      這個截斷的極端形式），本次**刻意未做**——它是新增邏輯、未經複核者檢視，且盤前 09:00 的
+      合法 `amt` 本就可能極小，門檻要另外找依據。
 
 - **盤後分析摘要長文卡上線（2026-08-07）**：`pm-summary-1`，走**獨立 LINE Image message**
   （官方 2020-05 起像素無上限），不進 Flex carousel——2000 字塞進 1024×1024 有效字級只剩
@@ -148,7 +246,8 @@
     使用點 `limit = MAX_LONGFORM_BYTES if longform else MAX_PNG_BYTES`），
     289KB 遠低於門檻，**無整批連坐**。註：原記錄寫「1040×4812／292KB」，實際 4998px／289KB，
     屬**當日內容長度差異、非缺陷**（上方數字已更正）。
-  - **② ❌ 推播掛圖未達成** → 已升格為獨立未解問題，見下一條「盤後圖卡推播時序」。
+  - **② ❌ 推播掛圖未達成** → 已升格為獨立問題，見下一條「盤後圖卡推播時序錯位」
+    （**2026-08-09 已實作修正、尚未部署**）。
   - **③ ⏳「實機看 bubble 呈現」仍未驗**（官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
     **前置條件是先修好下一條的時序問題**——圖根本沒掛上推播，就沒有 bubble 可看。
     另記一筆**觀測缺口**：`pushDailyCards` **完全沒有呼叫 `recordJob`**（`worker/src/index.js`
@@ -156,11 +255,13 @@
     `export async function recordJob`，backup/summary/chain/aetf2/health 各路徑都有記，
     唯獨 cards 沒有），所以 `/jobs?date=` 與 `/health?slot=eve` 都查不到當晚推播結局——
     實查 08-07 與 08-06 的 `/jobs` 各 19 筆事件、**皆無 cards**。
-    **LINE 是否送達只有使用者手機看得到，無法從外部確認**。建議補 `recordJob`。
+    **LINE 是否送達只有使用者手機看得到，無法從外部確認**。
+    → **觀測缺口已於 2026-08-09 補上**（`pushDailyCards` 新增 5 個 `recordJob` 呼叫點，
+    見下一條的「觀測」項；尚未部署）；但「是否送達」這點仍只有使用者手機看得到。
 
-- **🔴 未解：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
-  （2026-08-09 追 08-07 長文卡驗收時挖出的**系統性問題**，非單一事件）：
-  - **機制（已驗證，程式碼佐證）**：`.github/workflows/cards.yml` 的 cron 是 `'12 14 * * 1-5'`
+- **✅ 已修（2026-08-09，尚未部署）：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
+  （同日追 08-07 長文卡驗收時挖出的**系統性問題**，非單一事件）：
+  - **機制（已驗證，程式碼佐證；以下為修正前的行為）**：`.github/workflows/cards.yml` 的 cron 是 `'12 14 * * 1-5'`
     （grep 此字面量即得）＝台北 22:12，但 **GitHub schedule 實際延遲 54 分~2 小時 25 分**；
     推播端 `pushDailyCards`（`worker/src/index.js` 的 `export async function pushDailyCards`，
     門檻 `export const CARDS_PUSH_AFTER_MIN`＝`22 * 60 + 30`）台北 **22:30**
@@ -176,9 +277,49 @@
   - **文件裡的錯誤假設**：`cards.yml` 註解寫的「22:12 渲染 → 22:30 推播剛好（~46 分餘裕）」
     在 GH cron 實際延遲下**不成立**；而本段下方「Worker 升格全系統主排程」的「待改進①」其實早記過
     「GH cron 兜底 schedule run 仍延遲約 1.5-2.5h」，**只是沒人把它連到 cards 班**。
-  - **修法候選（均未實作）**：① 比照其他班改由 **Worker 在台北 21:50 主動 `workflow_dispatch
-    cards.yml`**，GH cron 留兜底；② `pushDailyCards` 加「manifest 非當日就**先不推、不寫 KV**，
-    等到窗尾 23:5x 才退純文字」的等待邏輯。
+  - **修法（兩案都做，已實作 2026-08-09；皆在 `worker/src/index.js`，尚未部署）**：
+    - **生產端**：新增 `export const CARDS_RENDER_AFTER_MIN`（台北 **22:00**）與
+      `export async function runCardsRender`，`export async function runEvening` 在 `export async function runAetf2` 與
+      `pushDailyCards` 之間插一步。**掛在既有晚場班上，`worker/wrangler.toml` 的 `crons[]` 一條沒動**。
+      冪等鍵 `bkfired:<YYYYMMDD>:cardsrender`（`export const bkfiredKey` 產生，**日期去掉連字號**，
+      沿用 `export async function runAetf2` 的鍵與值格式），**失敗不寫鍵 → 5 分後自動重試**；
+      GH `cards.yml` 的 22:12 cron 留兜底（**不變式：一條不刪**）。
+    - **為何取 22:00 而非候選①的 21:50**：`export const AETF2_AFTER_MIN` 是 **21:45** 才 dispatch
+      `aetf.yml`，`data/aetf/diff.json` 還要幾分鐘才 push 上來。更早開渲染會把**昨日的主動 ETF
+      數字燒進 PNG**，而 `manifest.date` 取自 `baseline.date`（今日）→
+      `export function attachCardImages` 的當日守門**攔不到這種「當日 manifest 裝舊數字」**，
+      比沒有圖更糟。
+    - **消費端**：新增 `export const CARDS_WAIT_UNTIL_MIN`（台北 **23:45**），
+      `export async function pushDailyCards` 新增等待分支（**排在 0 卡短路之後**）：
+      manifest 非當日時**不推、也不寫 KV 去重鍵**，等到窗尾才退回純文字。
+    - **為何兩案都做**：候選①改的是**生產端時點**、候選②改的是**消費端韌性**，解的是不同層。
+      單做①，渲染一失敗或遲到就回到原狀；單做②，GH cron 實測延遲到 23:06~00:37，
+      等到 23:45 窗尾**大多仍等不到**。
+    - **觀測**：`pushDailyCards` 新增 **5 個 `recordJob` 呼叫點**（pushed／skip-empty／error／
+      baseline waiting／manifest waiting），補上上一條記的觀測缺口。等待分支的取樣條件
+      `sampleTick` 寫成**窗首（22:30~22:34）或窗尾（23:45~23:49）各一輪**，
+      避免違反 `recordJob`「只記狀態轉換、不記輪詢噪音」的既有慣例；
+      **代價**是若窗首那輪 Worker 沒醒，會少一筆紀錄。
+    - **兩個等待分支實際取樣到的輪次不同（2026-08-09 複驗更正）**：原記錄籠統寫「等待分支只在
+      窗首與窗尾各取樣一輪」，**對 manifest 分支不成立**。逐分鐘窮舉 0~1439 驗證：
+      **baseline 等待分支**沒有窗尾截止條件 → **窗首與窗尾都會記**；
+      **manifest 等待分支**的進入條件是 `nowMin < CARDS_WAIT_UNTIL_MIN`，
+      與窗尾取樣條件 `nowMin >= CARDS_WAIT_UNTIL_MIN` **互斥（交集為空集合）**
+      → 它的窗尾取樣是**不可達分支，只會在窗首記**。
+      **這不是缺陷**：manifest 等到窗尾就不再走等待分支，而是往下走完整推播流程並記終局
+      `pushed`（或 `error`），**觀測不會留白**。
+
+- **⏳ 待驗清單（上述兩條修正上線後的第一個交易日晚上要看）**：
+  - `CARDS_RENDER_AFTER_MIN` 取 **22:00 是推算不是實測**：`aetf.yml` 從 dispatch 到 `diff.json`
+    push、`cards.yml` 渲染各需幾分鐘，都只有**間接記載**。上線後第一晚要看 `/jobs?date=` 的
+    `cards-render` 紀錄與 manifest `generated_at` 的**實際落差**，必要時調整這個門檻。
+  - `AbortSignal.timeout` 在 **workerd 的實際行為未實測**（Node 22 上驗過會 abort）。
+    workerd 若不支援會落到 `AbortController` 分支，兩者都沒有則回 `undefined` 維持舊行為
+    ——**不會因此讓抓取失敗**，但也就等於沒有逾時保護。
+  - **LINE 是否真的送達仍只有使用者手機看得到**：`recordJob` 記的是「LINE API 回 200」
+    **不是「使用者收到」**，`lf=attached` 也只證明 image message 塞進 payload。
+    **「實機看 bubble 呈現」仍需使用者本人確認**（承上方長文卡條目的 ③）。
+  - **本批 Worker 改動尚未部署**——需 `cd worker && npm run deploy`。
 
 - **✅ 已結案：CF cron dow 慣例錯誤，13 條 cron 星期五全不觸發、星期日誤觸發**
   （2026-07-31 定案並部署 version `f13ab220`；**08-02 週日與 08-07 週五兩次驗收皆通過**——
@@ -195,7 +336,7 @@
   ③ commit `527c0c0`（2026-07-20）message 記載首發被 CF 回 400
   `invalid cron string: 30 21 * * 0-4`——POSIX 合法的 `0` 被拒，證明 dow 下限是 1。
   **當時誤讀為「CF 拒收 dow 0」**，遂把 `1-5` 當平日用，bug 自 commit `00666ec` 第一天就存在。
-  **連鎖**：frame 班週五不醒 → `storeFrame`（`worker/src/index.js:249`）/`appendSeries`（`:318-331`）沒被呼叫
+  **連鎖**：frame 班週五不醒 → `storeFrame`（`worker/src/index.js` 的 `export async function storeFrame`）/`appendSeries`（同檔 `export async function appendSeries`）沒被呼叫
   → `series:<週五>` 不存在 → `/health` 回 `noSeries:true` → 所有 TW 班被 non-trading-day 守門擋掉
   （`/backup?name=*` 與 `/evening` 實測全回 `skipped:"non-trading-day"`）；GH `intraday.yml` 週五
   有跑但 KV 無 frame，`src/archive_intraday.py` 的 `if n_hit == 0:` 分支優雅退出不寫檔 → JSON 404。
@@ -204,9 +345,9 @@
   晚場協調班週五不醒 → summary-pm 無檔、diag→mktbal 鏈不啟動。daysummary/aetf 週五靠 GH 兜底落地。
   交叉驗證：`/jobs?date=20260731` 只有 3 筆、最後一筆停在台北 06:50（dow `*` 的班），
   而晨間健檢 `"30 1 * * 1-5"`（台北 09:30）若有跑，`runHealthCheck` 結尾無條件 `recordJob`
-  （`worker/src/index.js:1209`）必留一筆 `health-morn`——沒有，證明它週五沒被叫起來。
-  **已排除**：`taipeiParts()`（:608）UTC+8 換算正確；程式內 `tp.dow >= 1 && tp.dow <= 5`
-  守門（:517、:627、:632）用 JS `getDay` 慣例（0=日），判台北週一~五**正確無誤**。
+  （`worker/src/index.js` 的 `export async function runHealthCheck` 結尾）必留一筆 `health-morn`——沒有，證明它週五沒被叫起來。
+  **已排除**：`taipeiParts()`（`worker/src/index.js` 的 `export function taipeiParts`）UTC+8 換算正確；程式內 `tp.dow >= 1 && tp.dow <= 5`
+  守門（`export function inFlowLastWindow` 一處、`export function scheduledRole` 兩處）用 JS `getDay` 慣例（0=日），判台北週一~五**正確無誤**。
   真正的坑是**同一個字面量 `1-5`，JS 裡是週一~五、CF cron 裡是週日~週四**。
   **修法（當時狀態：已改，未部署；實際已於 2026-07-31 部署 version `f13ab220`，見本段開頭）**：13 條 dow `1-5` → `2-6`，並同步 `worker/src/index.js` 的 `FRAME_CRON`
   ＋`BACKUP_CRONS`／`DISPATCH_ROLES` 等 12 處字面量 key、`worker/test/*.mjs` 28 處，共 53 處。
@@ -254,7 +395,7 @@
   `bkfired`、之後一律短路」的盲點——首發的 GH run 若自己失敗、產物沒更新，Worker 當日不再補救
   （五條單發班各只有一條主 cron ＝ Worker 端零重試，只剩 GH 兜底一次）。三處改動：
   ① KV `bkfired` 值升級為 JSON `{s,ts,n}`（`parseBkState`／`bkGate`／`bkStateValue`，
-  `worker/src/index.js:773` 起），舊純字串相容（視為 ts=0、n=1）；② CF cron 12→**17 條**，
+  `worker/src/index.js` 的 `export function parseBkState` 起），舊純字串相容（視為 ts=0、n=1）；② CF cron 12→**17 條**，
   五單發班各加一條 recheck（daysummary 14:05／intraday 15:10／aetf 19:00／baseline 20:55
   ——等腳本自帶 10 分×4 重試跑完才判／us 05:35），冷卻 20 分後產物仍非今日 → 補發第 2 次，
   上限 `BK_MAX_ATTEMPTS=2` 後不再發（留給 GH 兜底）；③ 既有 `sendAlert` 三通道接到排程失敗
@@ -295,7 +436,7 @@
   僅因命中 1/54 格倖存，該檔對回測近乎無用）。修復後本機補跑 07-20/07-21 各 54/54 全命中
   （frame TTL 2 天內搶救）。07-18 frame 已過期無法補，回測樣本自 07-20 起算。
 - **/live 資料時間改取 max(date)（2026-07-21，deploy version `572399a2`）**：`aggregate()`
-  原 `ts = ts || r.date`（`worker/src/index.js:188`）取「第一檔有分類個股」的 date 當全站資料時間，
+  原 `ts = ts || r.date`（`worker/src/index.js` 的 `export function aggregate`）取「第一檔有分類個股」的 date 當全站資料時間，
   一旦第一檔是冷門股（如 6680，最後成交定格 13:12:51、量僅 1 張），整站「資料時間」就被拖成盤中舊值、
   收盤後也不前進。改為掃全體有分類個股取 `max(date)`（date 為定寬字串，字典序＝時序）。
   **驗證**：部署後線上 `/live` ts 從 `13:12:51` 修正為 `15:00:00`（當日最新成交＝盤後零股定盤）。
@@ -533,8 +674,21 @@
   cron＋「日≤7」守門＝每月第一個週六 08:00 台北；dispatch 不受限）跑既有 src/meta.py 重建
   classify.json，commit 前有 schema 守門（map 值鍵恆為 n/e/c/p/t/sh，下游 v2 前端＋postmkt
   build_diag 依賴）。**續作指針（7b，8 月初）**：data/intraday/ 累積 ≥10 交易日後回測
-  「盤中佔比躍升/動能加速」的 T+30分/收盤延續性；注意 2026-07-18.json 是週六 stale 資料
-  （frames[i].stale=1、僅 12:20 一點），回測時應以 stale 與 n_hit 過濾；meta 與 intraday
+  「盤中佔比躍升/動能加速」的 T+30分/收盤延續性；**資料衛生：以「時點覆蓋率」過濾，不要用
+  `stale`**（本條 2026-08-09 改寫，原文教人「以 stale 與 n_hit 過濾」，已證實誤導——理由見下）。
+  「歸檔檔案可能覆蓋率極低」是**真實發生過**的風險（2026-07-18 週六殘檔，僅 1/54 格；該檔已於
+  2026-08-09 刪除，來龍去脈見上方「✅ 已結案（2026-08-09 追查）」段的「✅ 已刪除」條）。
+  **現在有兩道防線**：①源頭＝`src/archive_intraday.py` 的 `MIN_COVER = 0.9` 守門（2026-08-09 新增，
+  命中率低於門檻就印訊息、優雅退出不寫檔）；②下游＝`src/build_rrg_base.py` 與 `backtest/run_rrg.py`
+  **同名同值**的 `MIN_COVER` 剔除。新寫的回測請沿用同一常數名與口徑，別自創門檻。
+  **為什麼 `stale` 不能當可用性指標（已實測 13 個交易日）**：`stale` 只表示「該格是 Worker 回退
+  ≤5 分鐘拿到的上一筆 frame」，而回退是**常態**——13 個交易日**每一天**的 stale 佔比都 ≥83%，
+  其中 2026-07-23、08-03、08-04、08-07 是 **54/54 全 stale**，但這四天覆蓋率 100%、series 276 筆、
+  完全正常。**照原文以 stale 過濾會把幾乎整份資料集丟光，卻一個壞檔也擋不到。**
+  （附帶：`n_hit` **根本不存在於日檔 JSON 裡**——它只是 `archive_intraday.py` 的執行期計數器，
+  下游拿不到；下游算的是 `total` 陣列的 truthy 比例，語意差異見上方「注意（仍然成立，勿當成同一件事）」條。）
+  真正該剔除的是 `data/intraday/2026-07-30.json` 那種**時序逆轉/重複點**（見「`appendSeries` 的
+  lost update 競態」段），那才是 stale 標記涵蓋不到的髒資料；meta 與 intraday
   同日先後跑時 intraday 用 checkout 當下的 classify 快照（檔內自洽，屬預期）。
 - 「即時一覽」tab（2026-07-18 夜間三期完工，現為**預設 tab**、第 7 個 tab）：綜合呈現
   「此刻誰在推動大盤」——儀表列（加權/櫃買、廣度條、成交值＋資金速率＋大盤 sparkline、
@@ -587,7 +741,7 @@
   在 build_aetf_diff.py 折回持股基準日（`fold_tplus1`/`prev_trading_day`，用 FinMind TAIEX 日曆，
   正確處理連假；07/10 為非交易日已驗）→ 8 檔同基準、diff.json 加 `primary_date`/`laggards`。
   ②build_aetf.py 抓取成功但 src_date 未前進標 `not_advanced`。③aetf.yml 加補抓班 21:37 台北
-  （同日重跑覆蓋同名日檔，冪等）。④build_morning.py chips 加 `aetf_date`（P1 也把 :68/:220 的
+  （同日重跑覆蓋同名日檔，冪等）。④build_morning.py chips 加 `aetf_date`（P1 也把 `def exdiv_today`／`def main` 內標 `# P1：台北日` 兩處的
   date.today() 改台北日）。⑤build_us.py generated_at 改台北 ISO。**news 站晨報顯示端若要帶出
   aetf_date 需另在 taiwan-stock-news 改（本批未動該 repo）**。前端 renderAETF 聚合表已帶主基準日＋落後檔警示。
 - **主動ETF 遷移 FinMind（2026-07-20）**：build_aetf.py 移除 6 套逐家投信 PCF 逆向工程

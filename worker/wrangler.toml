@@ -84,6 +84,10 @@ LIVE_TTL = "15"   # /live 聚合結果快取秒數
 
 # Secrets（不寫進檔）：
 #   npx wrangler secret put FINMIND_TOKEN      # FinMind API token
-#   npx wrangler secret put GH_DISPATCH_TOKEN  # GitHub PAT（fine-grained，
-#     對 taiwan-flows + postmkt + taiwan-stock-news 三 repo 給 Actions: Read and write），
-#     哨兵與新聞定點班用來 workflow_dispatch；未設時兩者整段跳過、其餘功能不受影響
+#   npx wrangler secret put GH_DISPATCH_TOKEN  # GitHub PAT（fine-grained，Actions: Read and write）
+#     涵蓋範圍（2026-08-09 更正）：taiwan-flows + postmkt + taiwan-stock-news **＋ 本 repo
+#     taiwan-flow-live-v2**。本註解原本只列前三個，但 2026-07-20 起 dispatchMorning（morning.yml）、
+#     runBackup（daysummary/aetf/baseline/us/intraday.yml）、runAetf2（aetf.yml）、
+#     runCardsRender（cards.yml）都是 dispatch 本 repo，且 07-22 首日實測全班 conclusion success
+#     （見 PROJECT_SUMMARY「Worker 升格全系統主排程」段）——本 repo 權限早已具備，只是註解沒跟上。
+#     哨兵／新聞／各主觸發班用來 workflow_dispatch；未設時整段跳過、其餘功能不受影響

@@ -229,8 +229,34 @@ const diag = pipes.find((p) => p.name === "diag");
   chk("evening: diag fired", out.diag?.fired === true);
   chk("evening: mktbal 等 diag", out.mktbal?.waiting === "dep");
   chk("evening: aetf2 fired（22:05 > 21:45）", out.aetf2?.fired === true);
+  // 2026-08-09 新增第 4 步：圖卡渲染主觸發（台北 22:00 起，見 runCardsRender）
+  chk("evening: cards-render fired（22:05 > 22:00）", out.cardsRender?.fired === true, JSON.stringify(out.cardsRender));
   const dispatched = spy.filter((s) => s.url.includes("/dispatches")).map((s) => s.url);
-  chk("evening: 恰 3 個 dispatch（summary/diag/aetf2）", dispatched.length === 3, dispatched.join(" | "));
+  chk("evening: 恰 4 個 dispatch（summary/diag/aetf2/cards）", dispatched.length === 4, dispatched.join(" | "));
+  chk("evening: cards.yml dispatch 對本 repo",
+    dispatched.some((u) => u.includes("/shihpc/taiwan-flow-live-v2/actions/workflows/cards.yml/")), dispatched.join(" | "));
+}
+// runCardsRender：22:00 前不動作、冪等（同日第二次喚醒不重發）
+{
+  const spy = [];
+  const kv = TRADING_KV();
+  const env = { ...ENV_BASE, GH_DISPATCH_TOKEN: "T", FLOW_KV: kv };
+  const early = await runEvening(env, { date: "2026-07-21", hour: 21, minute: 55, dow: 2 }, mkFetch(READY_PM, spy));
+  chk("cards-render 21:55 → waiting before-22:00", early.cardsRender?.waiting === "before-22:00",
+    JSON.stringify(early.cardsRender));
+  chk("cards-render 21:55 → 無 cards.yml dispatch",
+    !spy.some((s) => s.url.includes("cards.yml")), spy.map((s) => s.url).join(" | "));
+  const first = await runEvening(env, { date: "2026-07-21", hour: 22, minute: 0, dow: 2 }, mkFetch(READY_PM, spy));
+  chk("cards-render 22:00 → fired", first.cardsRender?.fired === true, JSON.stringify(first.cardsRender));
+  const spy2 = [];
+  const again = await runEvening(env, { date: "2026-07-21", hour: 22, minute: 5, dow: 2 }, mkFetch(READY_PM, spy2));
+  chk("cards-render 同日再喚醒 → already-fired", again.cardsRender?.skipped === "already-fired",
+    JSON.stringify(again.cardsRender));
+  chk("cards-render 同日再喚醒 → 不重發 cards.yml",
+    !spy2.some((s) => s.url.includes("cards.yml")), spy2.map((s) => s.url).join(" | "));
+  const jobs = await kv.get(`jobstat:20260721`, "json");
+  chk("cards-render fired 有進 jobstat", (jobs || []).some((j) => j.n === "cards-render" && j.r === "fired"),
+    JSON.stringify(jobs));
 }
 // 非交易日 → 整段 skip 零網路
 {
