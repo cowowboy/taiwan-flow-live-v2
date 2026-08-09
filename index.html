@@ -125,10 +125,26 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 .ovreplaybar input[type=range]{flex:1;min-width:140px}
 .ovsumgrid{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
 .ovsumgrid>div{flex:1;min-width:200px}
+/* 即時一覽 tab（輪動雷達 RRG，2026-08-09）：左圖右候補清單；min-width:0 讓 flex 子項可縮，避免橫向溢出 */
+.ovrrgwrap{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start}
+.ovrrgchart{flex:3 1 340px;min-width:0}
+.ovrrgside{flex:1 1 210px;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 8px}
+.ovrrgtabs{display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap}
+.ovrrglist{max-height:330px;overflow:auto}
+.ovrrgitem{display:flex;gap:6px;align-items:baseline;justify-content:space-between;
+  padding:4px 6px;border-bottom:1px solid var(--line);cursor:pointer;font-size:12px}
+.ovrrgitem:hover{background:var(--panel2)}
+.ovrrgitem.on{background:var(--panel2);border-left:3px solid var(--accent);padding-left:3px}
+.ovrrgitem .nm{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ovrrgitem .mt{color:var(--dim);white-space:nowrap;font-size:11px}
+.ovrrghint{font-size:11px;color:var(--dim);margin:4px 2px 0}
 /* 手機寬度：雷達三表改直向堆疊、各自全幅（表內欄位仍可 .tablewrap 橫向捲動）（2026-07-21） */
 @media (max-width:560px){
   .ovradar{flex-direction:column;gap:10px}
   .ovradar>div{min-width:0;width:100%}
+  .ovrrgwrap{flex-direction:column}
+  .ovrrgchart,.ovrrgside{width:100%;flex:1 1 auto}
+  .ovrrglist{max-height:240px}
 }
 </style>
 </head>
@@ -170,7 +186,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
 
 // 摘要分析可選模型（與 postmkt/news 三站共用 localStorage key：insight_model / anthropic_key）
 const INSIGHT_MODELS=[["claude-opus-4-8","Opus 4.8（最佳判讀，約NT$3/次）"],["claude-sonnet-5","Sonnet 5（近Opus、約半價更快）"]];
-const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, sub:{ov:{open:null,view:"sub",expandAll:false,treeChain:null,treeSub:null,treeRest:false,treeUnc:null,treeUncRest:false,mapView:"tree",radarClosed:false}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}},
+const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, sub:{ov:{open:null,view:"sub",expandAll:false,treeChain:null,treeSub:null,treeRest:false,treeUnc:null,treeUncRest:false,mapView:"tree",radarClosed:false,rrgTab:"in",rrgPicks:[]}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}},
   insight:null, insightLoading:false, insightErr:null,
   insightModel: localStorage.getItem("insight_model")||"claude-opus-4-8"};
 
@@ -1179,12 +1195,423 @@ function ovQuadrantHtml(){
   return `<div class="ovquad"><div class="ovquadzoom" id="ovQuadZoom"><svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${svg}${bub}${lbls}</svg></div></div>`+
     `<div class="ovtfoot">取成交值前 ${rows.length} 個次產業；泡泡面積∝全日成交佔比（r=k√佔比）；點泡泡下鑽成分股（自動切回地圖視角）。雙指縮放／滑鼠滾輪放大、拖曳平移、雙擊還原。</div>`;
 }
+// ================= 輪動雷達（RRG，2026-08-09；規格 docs/rrg-spec-20260809.md）=================
+// 產業鏈盤中相對輪動軌跡。x=RS-Ratio=100×share_i(t)/base_i(t)（base=前 5 交易日同時點 share 平均，
+// 由 src/build_rrg_base.py 產出 data/rrg_base.json）；y=RS-Mom=100+(RS-Ratio(t)−RS-Ratio(t−30分))。
+// 軌跡畫 6 點、step=10 分；每個座標點的 mom 還要往前 30 分（3 格）→ 畫 6 點需 9 個時點的 frame。
+// 佔比分母一律用該 frame 的上市總成交額（ovReplayBuild().mkt.tseYi，等同 market.tse.amt_yi 的回放版），
+// 不可用鏈加總（多對多歸屬會重複計數）；只計 info.t==="twse"（沿用 ovAggBy 口徑）。
+// 文案紀律：只描述當下相對前 5 日常態的位置與 30 分鐘內變化，不做預測宣稱。
+//
+// 【ZEXT 的由來，改動前務必看懂】位移異常的自身分布用「最近 WIN=6 筆 30 分位移」
+// （backtest/run_rrg.py 的 zscore_pool() win 變體，MIN_WIN=4）。一筆 30 分位移需要
+// 座標(t) 與座標(t−30分)＝往前 3 個座標點，所以 N 個座標點只生得出 N−3 筆位移：
+// 光靠畫圖用的 6 個座標點只有 3 筆，低於 MIN_WIN=4 → 位移異常永遠不會觸發。
+// 因此另取 ZEXT 個「只算 z、不畫出來」的較早座標點：座標點數 = NPT+ZEXT，
+// /replay 時點數 = NPT+ZEXT+3，位移筆數 = NPT+ZEXT−3。
+//   ZEXT=3 → 12 個時點、6 筆位移（＝run_rrg.py 的 WIN=6 全尺寸，本檔採用）
+//   ZEXT=1 → 10 個時點、4 筆位移（剛好達 MIN_WIN，預算最省）
+//   ZEXT=0 →  9 個時點、3 筆位移（符合規格 §4「請求數=9」，但位移異常等同關閉）
+const OV_RRG_STEP=10, OV_RRG_NPT=6, OV_RRG_LAG=30;   // 取樣間隔（分）／畫出來的軌跡點數／動能落後窗（分）
+const OV_RRG_ZEXT=3;                                 // 額外座標點（只餵 z 視窗，不畫）；見上方說明
+const OV_RRG_WIN=6, OV_RRG_MINWIN=4;                 // 自身位移分布視窗／最少筆數（run_rrg.py 的 WIN / MIN_WIN）
+const OV_RRG_TMIN=545, OV_RRG_TMAX=810;              // base 時點範圍 09:05–13:30（5 分鐘格）
+const OV_RRG_TOPN=10, OV_RRG_KEEPN=15;               // 錨點＝成交額 Top10；保留（不淡化）門檻 Top15
+const OV_RRG_Z=2.0, OV_RRG_DPP=0.02;                 // 位移異常：z≥2.0 且 Δshare≥0.02 個百分點
+const OV_RRG_TINY=30;                                // 當日成交額 <30 億 標「極小量」灰字（不剔除）
+// 候補清單**刻意不設上限**：畫布的 OV_RRG_IMPMAX 之所以「不損失發現力」，唯一的理由就是
+// 超出者仍完整列在側欄（規格 §2「改善象限標籤」）。側欄一旦也截斷，那個論據就跳票。
+// 列數天然有界（＝rrg_base.json 的產業鏈數，目前 47 條），.ovrrglist 可捲動，無爆量風險。
+const OV_RRG_IMPMAX=12;                              // 改善象限強制標示上限（超出者退回一般保留族群；側欄仍列全部）
+const OV_RRG_RETRY=2, OV_RRG_RETRY_MS=15000;         // fetch 失敗的時點允許重試次數／重試冷卻（見 ovRrgEnsure）
+const OV_RRG_BASE_STALE=3;                           // base 最後一天距今超過幾個交易日就示警
+
+// ---- 基準表（data/rrg_base.json）：比照 classify.json 的同源相對路徑載入 ----
+// 檔案可能尚未產出（builder 另案），失敗時整頁不受影響，只有本視角顯示降級文案。
+let OV_RRG_BASE=null, OV_RRG_BASE_IDX=null, OV_RRG_BASE_ERR=null, OV_RRG_BASE_REQ=false;
+function ovRrgRepaint(){ if(state.tab==="ov"&&state.live&&state.cl)renderOverview(); }
+function ovRrgBaseLoad(){
+  if(OV_RRG_BASE||OV_RRG_BASE_REQ)return;
+  OV_RRG_BASE_REQ=true;
+  loadJSON("data/rrg_base.json").then(j=>{
+    if(j&&j.chains&&Array.isArray(j.times)&&j.times.length){
+      OV_RRG_BASE=j; OV_RRG_BASE_IDX={}; j.times.forEach((t,i)=>{OV_RRG_BASE_IDX[t]=i;});
+    }else OV_RRG_BASE_ERR="基準檔內容不完整（缺 times/chains）";
+    ovRrgRepaint();
+  }).catch(e=>{ OV_RRG_BASE_ERR=String((e&&e.message)||e); ovRrgRepaint(); });
+}
+// base 新鮮度：days 最後一天距「今天（台北）」幾個交易日。只扣週末、不含國定假日
+// ——這是保守低估（實際只會更舊），寧可少報也不誤報。排程連續失敗時基準會悄悄過期，
+// 而 RS-Ratio 仍照算，故必須在頁尾據實顯示基準日期區間並在過舊時示警。
+function ovRrgBaseDays(){
+  const ds=(OV_RRG_BASE&&Array.isArray(OV_RRG_BASE.days)?OV_RRG_BASE.days:[])
+    .filter(x=>typeof x==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(x)).slice().sort();
+  if(!ds.length)return null;
+  const to=ds[ds.length-1];
+  const now=new Date(Date.now()+8*3600e3);
+  const today=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate());
+  const last=Date.parse(to+"T00:00:00Z");
+  let gap=0;
+  if(!isNaN(last))for(let t=last+864e5;t<=today;t+=864e5){const w=new Date(t).getUTCDay();if(w>=1&&w<=5)gap++;}
+  return {from:ds[0],to,n:ds.length,gap,stale:gap>OV_RRG_BASE_STALE};
+}
+function ovRrgBaseAt(name,hm){
+  if(!OV_RRG_BASE||!OV_RRG_BASE_IDX)return null;
+  const i=OV_RRG_BASE_IDX[hm]; if(i==null)return null;
+  const a=OV_RRG_BASE.chains[name]; if(!Array.isArray(a))return null;
+  const v=a[i]; return (typeof v==="number"&&v>0)?v:null;
+}
+
+// ---- 軌跡快取：以「交易日＋時點」為鍵，同一時點只打一次 /replay ----
+// 20 秒自動刷新時 ovRrgTimes() 的時點集合不變 → need=[] → 不發請求；
+// 跨到新的 10 分鐘格時集合只多出最新一格 → 只發 1 次請求（規格 §4 完成定義 4）。
+// fails：每個時點的 fetch 失敗次數；retryAt：重試冷卻到期時間（見 ovRrgEnsure 的失敗處理）。
+let OV_RRG={date:null,frames:{},fails:{},retryAt:0,loading:false,err:null,seq:0};
+// 一格 frame → 產業鏈層 share/成交額。ovAggBy 走全域 OV_REPLAY 取值，故同步暫換再還原
+// （純同步、try/finally 保證還原，期間不會有其他程式讀到被暫換的值）。
+function ovRrgAggFrame(j){
+  const fr=ovReplayBuild(j);
+  const save=OV_REPLAY;
+  let agg;
+  try{ OV_REPLAY=fr; agg=ovAggBy(null,info=>info.c||[]); }
+  finally{ OV_REPLAY=save; }
+  const mktYi=fr.mkt.tseYi||0;
+  const shares={}, amtYi={};
+  if(mktYi>0)for(const k in agg){ const a=agg[k].amt/1e8; amtYi[k]=a; shares[k]=a/mktYi; }
+  return {t:fr.t,mktYi,shares,amtYi};
+}
+// 錨點時點：由 13:30 往回推的 10 分鐘格（皆落在 base 的 5 分鐘格上），夾在 09:05–13:30。
+// 減 1 分鐘餘裕：Worker 每分鐘才寫一格，剛跨格時該分鐘的 frame 可能還沒寫入。
+function ovRrgAnchorMin(){
+  const now=ovTaipeiNowMin();
+  if(now<OV_RRG_TMIN)return null;                       // 盤前／凌晨：今日尚無盤中 frame
+  let m=Math.min(now-1,OV_RRG_TMAX);
+  m=OV_RRG_TMAX-Math.ceil((OV_RRG_TMAX-m)/OV_RRG_STEP)*OV_RRG_STEP;
+  return m<OV_RRG_TMIN?null:m;
+}
+function ovRrgTimes(anchor){
+  const samples=[], all=[];
+  for(let i=OV_RRG_NPT+OV_RRG_ZEXT-1;i>=0;i--){         // 由舊到新；前 ZEXT 個只餵 z 視窗不畫
+    const m=anchor-i*OV_RRG_STEP;
+    if(m-OV_RRG_LAG<OV_RRG_TMIN)continue;               // 動能落後窗落到 base 範圍外 → 該點無座標
+    const hm=ovMin2Hm(m), lag=ovMin2Hm(m-OV_RRG_LAG);
+    samples.push({m,hm,lag}); all.push(hm,lag);
+  }
+  return {samples,all:[...new Set(all)]};
+}
+function ovRrgEnsure(times){
+  const d=(state.live.ts||"").slice(0,10);
+  if(OV_RRG.date!==d)OV_RRG={date:d,frames:{},fails:{},retryAt:0,loading:false,err:null,seq:OV_RRG.seq+1};   // 換交易日 → 快取作廢
+  const need=times.filter(hm=>!(hm in OV_RRG.frames));
+  if(!need.length||OV_RRG.loading)return;
+  if(Date.now()<OV_RRG.retryAt)return;      // 待重試的時點：冷卻期內不重打（否則 repaint→重抓 會打成迴圈）
+  if(!CFG.worker){OV_RRG.err="未設定 Worker，無法取得盤中軌跡資料";return;}
+  OV_RRG.loading=true;
+  const seq=++OV_RRG.seq;
+  // 不帶 date：Worker 明訂「date 僅供驗證/測試，正式前端不帶＝台北今日」（worker/src/index.js 的 replayFrame()）。
+  // 週末／假日因此必然取不到 frame → 落到下方降級文案，這正是規格 §6 要的行為
+  // （帶 date 會畫出上一交易日軌跡，使用者易誤認為即時盤面）。
+  Promise.all(need.map(hm=>loadJSON(CFG.worker+"/replay?t="+encodeURIComponent(hm))
+      .then(j=>({hm,j})).catch(()=>({hm,j:null}))))
+    .then(res=>{
+      if(seq!==OV_RRG.seq)return;
+      let ok=0, net=0, pend=0;
+      for(const r of res){
+        if(r.j===null){
+          // fetch 本身失敗（連不上／CORS／網路抖動），非「無資料」：一次抖動不該讓該時點
+          // 整個交易日取不回來，故先記次數，超過 OV_RRG_RETRY 次才永久標 false。
+          net++;
+          const n=(OV_RRG.fails[r.hm]||0)+1; OV_RRG.fails[r.hm]=n;
+          if(n>OV_RRG_RETRY)OV_RRG.frames[r.hm]=false;    // 重試用盡 → 比照無資料永久快取
+          else pend++;                                    // 尚可重試 → 不入快取，等冷卻後下次刷新再試
+          continue;
+        }
+        // Worker 有回應（含 200＋{error} 的「真的沒有 frame」）→ 立即永久快取，不再重打
+        let f=false;                                     // false＝該時點確定取不到，不再重打
+        if(r.j.stocks){ try{ f=ovRrgAggFrame(r.j); ok++; }catch(e){ f=false; } }
+        OV_RRG.frames[r.hm]=f;                           // 一律入快取：否則 repaint→重抓→repaint 會打成迴圈
+      }
+      OV_RRG.loading=false;
+      OV_RRG.retryAt=pend?Date.now()+OV_RRG_RETRY_MS:0;
+      // 區分「連不上」與「確實無資料」：Worker 週末回 200＋{error}（有 j 無 stocks），
+      // 服務異常則是 fetch reject（j===null）。文案不可把服務中斷說成週末。
+      OV_RRG.err=ok?null:(net===res.length
+        ? (pend?`連不上 Worker（網路或服務異常），${Math.ceil(OV_RRG_RETRY_MS/1000)} 秒後自動重試（每個時點最多 ${OV_RRG_RETRY} 次）。`
+               : "連不上 Worker（網路或服務異常），重試已用盡；重新整理頁面可再試。")
+        : "取不到盤中快照（週末／假日，或該時段的 frame 已過 TTL）");
+      ovRrgRepaint();
+    })
+    .catch(e=>{
+      if(seq!==OV_RRG.seq)return;
+      // 這裡的例外不會來自個別 fetch（各自已 catch），但仍要設冷卻：否則 need 依舊非空，
+      // 下面的 repaint 會立刻再打一輪，變成迴圈。
+      OV_RRG.loading=false; OV_RRG.retryAt=Date.now()+OV_RRG_RETRY_MS;
+      OV_RRG.err="軌跡資料讀取失敗："+((e&&e.message)||e); ovRrgRepaint();
+    });
+}
+// 位移異常：以「該鏈自身」的位移分布標準化（絕對位移會被小基數暴量壟斷，見規格 §2）。
+// 完全比照 backtest/run_rrg.py 的 mad() 與 zscore_pool()：
+//   MAD **不做 1.4826 常態化**（z=2.0 就是對這個尺度校準的，乘上去等於偷偷把門檻放寬 1.48 倍）；
+//   MAD≤0 直接不給 z（對應 `if a <= 0: continue`），不自創平均絕對差之類的退化路徑
+//   —— 舊版那條退化路徑會讓 z 有 ≈1.995 的結構性上限，永遠打不到 2.0。
+const ovRrgMed=a=>{const s=[...a].sort((x,y)=>x-y),n=s.length;return n?(n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2):0;};
+function ovRrgZ(w,cur){
+  if(w.length<OV_RRG_MINWIN)return 0;                    // 不足 MIN_WIN 筆不判異常
+  const m=ovRrgMed(w), a=ovRrgMed(w.map(v=>Math.abs(v-m)));
+  // run_rrg.py 寫的是 `if a <= 0: continue`；浮點下「離差全為 0」實際會落在 1e-14 量級
+  // （(100*b)/b 差 1 ULP，或 /replay 回退機制讓相鄰時點拿到同一格 frame），此時 z 會噴到 1e16
+  // 而誤標。門檻改成 1e-9 是同一個意思的浮點版本，不是換估計量。
+  return a>1e-9?(cur-m)/a:0;
+}
+// 象限判定：四個邊界一律「≥100 算上／右」，左右半平面對稱——完全比照 backtest/run_rrg.py 的 quad()
+// （quad(99.9,100.0)=="改善"、quad(100.0,100.0)=="領先"，見 backtest/test_rrg_smoke.py 的 test_quad_boundaries()）。
+// 名稱以回測 run_rrg.py 的 QUADS 為正本：領先／轉弱／落後／改善。
+const ovRrgQuad=(x,y)=> x>=100 ? (y>=100?"領先":"轉弱") : (y>=100?"改善":"落後");
+const OV_RRG_QCOL={"領先":"var(--up)","轉弱":"#e8a33d","落後":"var(--down)","改善":"var(--accent)"};
+// 產業鏈層座標：base 有的鏈全算（無門檻），門檻只作用在顯示層
+function ovRrgCompute(T){
+  const valid=T.samples.filter(s=>OV_RRG.frames[s.hm]&&OV_RRG.frames[s.lag]);
+  const rows=[];
+  if(!valid.length||!OV_RRG_BASE)return {rows,valid};
+  for(const name in OV_RRG_BASE.chains){
+    const coords=[], cmap={};                            // 全部可算座標的取樣點（含 ZEXT 個不畫的較早點）
+    for(const s of valid){
+      const f=OV_RRG.frames[s.hm], fl=OV_RRG.frames[s.lag];
+      const b=ovRrgBaseAt(name,s.hm), bl=ovRrgBaseAt(name,s.lag);
+      if(!b||!bl)continue;
+      const sh=f.shares[name]||0, shl=fl.shares[name]||0;
+      const r=100*sh/b;
+      const c={m:s.m,hm:s.hm,x:r,y:100+(r-100*shl/bl),sh,shl};
+      coords.push(c); cmap[s.m]=c;
+    }
+    if(!coords.length)continue;
+    const last=coords[coords.length-1];
+    if(!(last.sh>0))continue;                            // 當下完全無成交 → 不畫（避免全擠在 x=0）
+    const pts=coords.slice(-OV_RRG_NPT);                 // 畫出來的尾巴仍是規格§4 的 6 點
+    const amtYi=(OV_RRG.frames[last.hm].amtYi[name])||0;
+    // 位移序列＝**30 分淨位移**：座標(t) 到座標(t−30分) 的歐氏距離，與 RS-Mom 的 L、Δpp 同窗長，
+    // 逐點取樣故相鄰兩筆的窗重疊 20 分（預期行為）。分子 cur 與分母分布取自同一個序列
+    // ——完全比照 backtest/run_rrg.py 的 disp_series() 與 zscore_pool()，尺度天然一致。
+    // 以分鐘查前一點（不用陣列位移），避免中間有時點抓不到時算成錯誤窗長。
+    const dser=[];
+    for(const c of coords){const p=cmap[c.m-OV_RRG_LAG]; if(p)dser.push(Math.hypot(c.x-p.x,c.y-p.y));}
+    const lp=cmap[last.m-OV_RRG_LAG];                    // 最新取樣點的 30 分前座標
+    const cur=lp?Math.hypot(last.x-lp.x,last.y-lp.y):0;  // 分子＝最新一筆 30 分位移
+    const z=lp?ovRrgZ(dser.slice(-OV_RRG_WIN),cur):0;    // 分母分布＝最近 WIN 筆同一個量
+    const dpp=Math.abs(last.sh-last.shl)*100;            // Δshare 同為 30 分窗（shl 即 t−30 分）
+    const quad=ovRrgQuad(last.x,last.y);
+    rows.push({name,pts,x:last.x,y:last.y,amtYi,share:last.sh*100,quad,z,dpp,move30:cur,ndisp:dser.length,
+      odd:(z>=OV_RRG_Z&&dpp>=OV_RRG_DPP), tiny:amtYi<OV_RRG_TINY});
+  }
+  rows.sort((a,b)=>b.amtYi-a.amtYi);
+  rows.forEach((r,i)=>{r.rank=i+1;});
+  return {rows,valid};
+}
+// 候補清單側欄：兩頁（改善象限＝資金剛輪入／領先象限＝動能領先），各按近 30 分位移排序。
+// 從**全部**產業鏈撈（不受畫布 Top N 限制）——畫布外的小族群是主要發現管道。
+// **兩頁一律列出該象限全部族群，不截斷**（理由見 OV_RRG_IMPMAX 上方；兩頁同規則，
+// 免得使用者要記「這頁全、那頁截」）。
+function ovRrgSideHtml(rows,picks){
+  const st=state.sub.ov, tab=st.rrgTab==="lead"?"lead":"in";
+  const want=tab==="lead"?"領先":"改善";
+  const list=rows.filter(r=>r.quad===want).sort((a,b)=>b.move30-a.move30);
+  const tabs=`<div class="ovrrgtabs">`+
+    `<button class="seg2 ${tab==="in"?"on":""}" data-ovrrg-tab="in">資金剛輪入</button>`+
+    `<button class="seg2 ${tab==="lead"?"on":""}" data-ovrrg-tab="lead">動能領先</button>`+
+    (picks.size?`<button class="seg2" data-ovrrg-clear>清除選取(${picks.size})</button>`:"")+`</div>`;
+  const items=list.length?list.map(r=>{
+    const on=picks.has(r.name);
+    return `<div class="ovrrgitem ${on?"on":""}" data-ovrrg-pick="${encodeURIComponent(r.name)}" `+
+      `title="${escI(ovChainDisp(r.name))}｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}">`+
+      `<span class="nm">${on?"✓ ":""}${escI(ovChainDisp(r.name))}</span>`+
+      `<span class="mt">${r.share.toFixed(2)}%・${r.quad}${r.tiny?"・極小量":""}</span></div>`;
+  }).join(""):`<div class="ovrrghint">此時段沒有落在「${want}」象限的產業鏈。</div>`;
+  return `<div class="ovrrgside"><div style="font-weight:700;font-size:12px;margin-bottom:4px">候補清單</div>`+
+    tabs+`<div class="ovrrglist">${items}</div>`+
+    `<div class="ovrrghint">點一下把該產業鏈加入畫布（顯示標籤與尾巴），再點取消。清單取自全部 ${rows.length} 條產業鏈，不受畫布 Top ${OV_RRG_TOPN} 限制；本頁列出「${want}」象限<b>全部 ${list.length} 條</b>（不截斷，可捲動），排序＝近 ${OV_RRG_LAG} 分位移。</div></div>`;
+}
+function ovRrgHtml(){
+  ovRrgBaseLoad();
+  // 降級①：基準表缺失／載入中（builder 另案產出，缺檔時只有本視角降級，其他視角不受影響）
+  if(!OV_RRG_BASE){
+    return OV_RRG_BASE_ERR
+      ? `<div class="loading">基準資料準備中：<b>data/rrg_base.json</b> 尚未產出或無法讀取（${escI(OV_RRG_BASE_ERR)}）。輪動雷達需要前 5 個交易日同時點的成交佔比基準，基準檔上線後本視角自動生效。</div>`
+      : `<div class="loading">基準資料載入中…</div>`;
+  }
+  // 降級②：盤前／凌晨（今日尚無盤中 frame，且不接 flow_last——單點撐不起軌跡）
+  // 生效時刻的算法（勿憑印象改）：錨點＝floor((now−1)/10)×10（ovRrgAnchorMin），座標點還要滿足
+  // m−LAG(30) ≥ TMIN(545) → 最早的座標點是 09:40；三個座標點要錨點推到 10:00，即台北 10:01 起可畫。
+  // 位移異常另需 MIN_WIN=4 筆 30 分位移＝7 個座標點（09:40…10:40），故錨點 10:40／台北 10:41 起才可能觸發。
+  const anchor=ovRrgAnchorMin();
+  const RRG_T0="約 10:00 後", RRG_TODD="約 10:40 後";
+  if(anchor==null)return `<div class="loading">盤前時段：輪動雷達需要盤中累積的分鐘快照（${RRG_T0}生效）。</div>`;
+  const T=ovRrgTimes(anchor);
+  if(T.samples.length<3)return `<div class="loading">盤中資料累積中：目前僅 ${T.samples.length} 個可用時點（軌跡至少需 3 個，${RRG_T0}生效；「位移異常」需更長的取樣視窗，${RRG_TODD}才會出現）。</div>`;
+  ovRrgEnsure(T.all);
+  const {rows,valid}=ovRrgCompute(T);
+  // 降級③：抓不到 frame（週末／假日／已過 TTL）或仍在載入
+  if(!rows.length){
+    if(OV_RRG.loading)return `<div class="loading">輪動軌跡載入中…（${T.all.length} 個時點快照）</div>`;
+    return `<div class="loading">${escI(OV_RRG.err||"此時段取不到盤中快照，暫時無法繪製輪動軌跡。")}</div>`;
+  }
+  if(valid.length<3)return `<div class="loading">盤中資料累積中：可用時點僅 ${valid.length} 個（軌跡至少需 3 個）。</div>`;
+
+  const st=state.sub.ov, picks=new Set(st.rrgPicks||[]);
+  const bd=ovRrgBaseDays();   // 基準實際日期區間與新鮮度（頁尾文案與示警都據此，不寫死「前 5 日」）
+  // 顯示規則（規格 §2）：保留＝Top15 或 改善象限 或 位移異常 或 使用者手動加入；其餘淡化且不標名（hover 可見）
+  rows.forEach(r=>{ r.show = r.rank<=OV_RRG_KEEPN || r.quad==="改善" || r.odd || picks.has(r.name); });
+  const anchors=rows.slice(0,OV_RRG_TOPN);              // 錨點：永遠有標籤與尾巴
+
+  const W=720,H=456,mL=54,mR=20,mT=28,mB=44,pw=W-mL-mR,ph=H-mT-mB;
+  // 軸範圍：以 3%~97% 分位為主體（避免小分母把比值撐到數百而壓扁全圖），
+  // 再強制納入 100 基準線與全部錨點軌跡；超出範圍的點夾到邊界（仍在圖上、hover 可看真值）
+  const cx=[], cy=[];
+  rows.forEach(r=>{ cx.push(r.x); cy.push(r.y); if(r.show)r.pts.forEach(p=>{cx.push(p.x);cy.push(p.y);}); });
+  const qt=(a,p)=>{const s=[...a].sort((x,y)=>x-y);return s[Math.min(s.length-1,Math.max(0,Math.round((s.length-1)*p)))];};
+  let xmin=Math.min(100,qt(cx,0.03)), xmax=Math.max(100,qt(cx,0.97));
+  let ymin=Math.min(100,qt(cy,0.03)), ymax=Math.max(100,qt(cy,0.97));
+  anchors.forEach(r=>r.pts.forEach(p=>{
+    xmin=Math.min(xmin,p.x); xmax=Math.max(xmax,p.x); ymin=Math.min(ymin,p.y); ymax=Math.max(ymax,p.y);
+  }));
+  const padX=((xmax-xmin)||1)*0.12, padY=((ymax-ymin)||1)*0.12;
+  xmin-=padX; xmax+=padX; ymin-=padY; ymax+=padY;
+  const cl=(v,a,b)=>Math.min(b,Math.max(a,v));
+  const X=v=>mL+cl((v-xmin)/(xmax-xmin),0,1)*pw, Y=v=>mT+ph-cl((v-ymin)/(ymax-ymin),0,1)*ph;
+  const maxShare=Math.max(...rows.map(r=>r.share))||1;
+  rows.forEach(r=>{ r.r=3.5+9*Math.sqrt(Math.max(r.share,0)/maxShare); r.cx=X(r.x); r.cy=Y(r.y); });
+  const x0=X(100), y0=Y(100);
+
+  // 四象限底色＋四角文字（比照影片慣例：領先右上／轉弱右下／落後左下／改善左上）
+  let svg=`<rect x="${x0}" y="${mT}" width="${mL+pw-x0}" height="${y0-mT}" fill="var(--up)" opacity="0.06"/>`+
+    `<rect x="${mL}" y="${mT}" width="${x0-mL}" height="${y0-mT}" fill="var(--accent)" opacity="0.06"/>`+
+    `<rect x="${x0}" y="${y0}" width="${mL+pw-x0}" height="${mT+ph-y0}" fill="#e8a33d" opacity="0.05"/>`+
+    `<rect x="${mL}" y="${y0}" width="${x0-mL}" height="${mT+ph-y0}" fill="var(--down)" opacity="0.05"/>`;
+  const corner=(x,y,a,t,c)=>`<text x="${x}" y="${y}" text-anchor="${a}" font-size="13" font-weight="700" fill="${c}" opacity="0.85">${t}</text>`;
+  svg+=corner(mL+pw-6,mT+14,"end","領先",OV_RRG_QCOL["領先"])+corner(mL+6,mT+14,"start","改善",OV_RRG_QCOL["改善"])+
+       corner(mL+pw-6,mT+ph-8,"end","轉弱",OV_RRG_QCOL["轉弱"])+corner(mL+6,mT+ph-8,"start","落後",OV_RRG_QCOL["落後"]);
+  svg+=`<rect x="${mL}" y="${mT}" width="${pw}" height="${ph}" fill="none" stroke="var(--line)"/>`+
+    `<line x1="${x0}" y1="${mT}" x2="${x0}" y2="${mT+ph}" stroke="var(--dim)" stroke-dasharray="3,3" opacity="0.6"/>`+
+    `<line x1="${mL}" y1="${y0}" x2="${mL+pw}" y2="${y0}" stroke="var(--dim)" stroke-dasharray="3,3" opacity="0.6"/>`;
+  svg+=`<text x="${mL}" y="${H-10}" font-size="12.5" fill="var(--dim)">${xmin.toFixed(0)}</text>`+
+    `<text x="${x0}" y="${H-10}" font-size="12.5" fill="var(--dim)" text-anchor="middle">100</text>`+
+    `<text x="${mL+pw}" y="${H-10}" font-size="12.5" fill="var(--dim)" text-anchor="end">${xmax.toFixed(0)}</text>`+
+    `<text x="${mL-5}" y="${mT+12}" font-size="12.5" fill="var(--dim)" text-anchor="end">${ymax.toFixed(0)}</text>`+
+    `<text x="${mL-5}" y="${y0+4}" font-size="12.5" fill="var(--dim)" text-anchor="end">100</text>`+
+    `<text x="${mL-5}" y="${mT+ph}" font-size="12.5" fill="var(--dim)" text-anchor="end">${ymin.toFixed(0)}</text>`+
+    `<text x="${mL+pw}" y="${H-25}" font-size="12.5" fill="var(--dim)" text-anchor="end">x=RS-Ratio（相對前${bd?bd.n:5}日常態）</text>`+
+    `<text x="${mL+4}" y="${mT-10}" font-size="12.5" fill="var(--dim)">y=RS-Mom（近${OV_RRG_LAG}分強弱變化；100=持平）</text>`;
+
+  // 尾巴：只給顯示族群（淡化者不畫線，這是控制擁擠的主力）
+  const tails=rows.filter(r=>r.show&&r.pts.length>1).map(r=>{
+    const col=OV_RRG_QCOL[r.quad]||"var(--muted)";
+    const d=r.pts.map(p=>`${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+    const dots=r.pts.slice(0,-1).map(p=>`<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="1.8" fill="${col}" opacity="0.5"/>`).join("");
+    return `<polyline points="${d}" fill="none" stroke="${col}" stroke-width="1.4" opacity="0.55" stroke-linecap="round" stroke-linejoin="round"/>${dots}`;
+  }).join("");
+  // 泡泡：淡化者先畫（在下層），顯示族群後畫；全部帶 <title> hover
+  const bubble=r=>{
+    const col=OV_RRG_QCOL[r.quad]||"var(--muted)";
+    const op=r.show?0.42:0.14, sop=r.show?1:0.3;
+    return `<circle cx="${r.cx.toFixed(1)}" cy="${r.cy.toFixed(1)}" r="${r.r.toFixed(2)}" fill="${col}" fill-opacity="${op}" `+
+      `stroke="${col}" stroke-opacity="${sop}" stroke-width="${r.rank<=OV_RRG_TOPN?1.8:1.1}">`+
+      `<title>${escI(ovChainDisp(r.name))}｜佔比 ${r.share.toFixed(2)}%（${r.amtYi.toFixed(0)}億${r.tiny?"・極小量":""}）`+
+      `｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}｜${r.quad}象限${r.odd?"｜位移異常":""}</title></circle>`;
+  };
+  const bubs=rows.filter(r=>!r.show).map(bubble).join("")+rows.filter(r=>r.show).map(bubble).join("");
+  // 標籤：只給顯示族群。**強制標示族群＝錨點（Top10）＋改善象限**（規格 §2「改善象限標籤」、
+  // §4 完成定義 2 兩者並列；改善象限正是本視角比排行榜多給的資訊，退回 hover 等於藏起來）。
+  // 上限 OV_RRG_IMPMAX：改善象限實測 8 條左右，但劇烈輪動時可能暴增而糊掉整張圖，
+  // 故超過上限時只強制標示「近 30 分位移」最大的前 N 條——側欄「資金剛輪入」本來就列全部，
+  // 超出者只是從畫布移到側欄，不損失發現力。
+  // 強制族群排最前面優先佔位，擁擠時被犧牲的是「其他保留族群」（Top15 內的非錨點、位移異常、手動加入）。
+  const impAll=rows.filter(r=>r.quad==="改善").sort((a,b)=>b.move30-a.move30);   // 與側欄同一排序
+  const impSet=new Set(impAll.slice(0,OV_RRG_IMPMAX).map(r=>r.name));
+  const forced=r=>r.rank<=OV_RRG_TOPN||impSet.has(r.name);
+  const placed=[], order=[...anchors,
+    ...impAll.filter(r=>r.show&&r.rank>OV_RRG_TOPN&&impSet.has(r.name)),         // 上限內的改善象限（已按位移排序）
+    ...rows.filter(r=>r.show&&r.rank>OV_RRG_TOPN&&!impSet.has(r.name))];         // 其他保留族群（含超出上限的改善象限）
+  const lbls=order.map(r=>{
+    const txt=`${ovChainDisp(r.name)} ${r.share.toFixed(1)}%`, tail=r.tiny?"·極小量":"";
+    const wpx=[...(txt+tail)].reduce((a,ch)=>a+(ch.charCodeAt(0)>255?12.5:7),0)+4;
+    const mk=(x,y,anc)=>`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anc}" font-size="12.5" font-weight="700" fill="var(--fg)" pointer-events="none">`+
+      `${escI(txt)}${tail?`<tspan fill="var(--muted)">${tail}</tspan>`:""}</text>`;
+    // [dx,dy,anchor]：dx 為文字錨點相對泡泡中心的位移
+    const cands=[[0,-r.r-5,"middle"],[0,r.r+15,"middle"],[r.r+5,4,"start"],[-r.r-5,4,"end"],
+                 [r.r+4,-r.r-2,"start"],[-r.r-4,-r.r-2,"end"],[r.r+4,r.r+12,"start"],[-r.r-4,r.r+12,"end"]];
+    let first=null;
+    for(const [dx,dy,anc] of cands){
+      const lx=r.cx+dx, ly=r.cy+dy;
+      const x1=anc==="middle"?lx-wpx/2:anc==="start"?lx:lx-wpx;
+      const box={x1,x2:x1+wpx,y1:ly-12,y2:ly+3};
+      if(box.x1<mL||box.x2>mL+pw||box.y1<mT||box.y2>mT+ph)continue;
+      if(first===null)first={box,lx,ly,anc};
+      if(placed.some(b=>!(box.x2<b.x1||box.x1>b.x2||box.y2<b.y1||box.y1>b.y2)))continue;
+      placed.push(box);
+      return mk(lx,ly,anc);
+    }
+    if(forced(r)){
+      // first===null＝8 個候選全部出界（泡泡貼邊＋標籤過寬）。此時夾回畫布內，
+      // 確保「強制族群永遠有標籤」在極端情況也成立（不因出界而靜默消失）。
+      let f=first;
+      if(!f){
+        const [dx,dy]=cands[0];                          // cands[0] 是正上方、text-anchor=middle
+        const ly=cl(r.cy+dy,mT+12,mT+ph-3);
+        const x1=Math.max(mL,Math.min(mL+pw-wpx,r.cx+dx-wpx/2));
+        f={box:{x1,x2:x1+wpx,y1:ly-12,y2:ly+3},lx:x1+wpx/2,ly,anc:"middle"};
+      }
+      placed.push(f.box); return mk(f.lx,f.ly,f.anc);
+    }
+    return "";
+  }).join("");
+
+  const nOdd=rows.filter(r=>r.odd).length, nShow=rows.filter(r=>r.show).length;
+  // 回放模式：本視角的錨點取自 ovRrgAnchorMin()（即時），不跟隨回放滑桿。同一畫面其他區塊是歷史時點，
+  // 若不標示會被誤讀成「回放時點的輪動」。跟隨回放留作後續增強（風險與範圍過大），此處先據實揭露。
+  const replayNote=OV_REPLAY
+    ? `<div class="ovrrghint" style="color:var(--accent);font-weight:700">回放模式：輪動雷達固定顯示<u>即時</u>軌跡（最新 ${escI(valid[valid.length-1].hm)}），不跟隨上方回放時點。</div>`
+    : "";
+  const chart=`<div class="ovrrgchart">${replayNote}<div class="ovquad"><div class="ovquadzoom" id="ovQuadZoom">`+
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${svg}${tails}${bubs}${lbls}</svg>`+
+    `</div></div></div>`;
+  const nDraw=Math.min(valid.length,OV_RRG_NPT);   // 畫出來的軌跡點數（valid 另含只算 z 的 ZEXT 個較早點）
+  // 基準新鮮度：據實顯示 rrg_base.json 的實際日期區間（不再寫死「前 5 個交易日」），
+  // 過舊時明顯示警——排程連續失敗時 base 會靜默沿用舊基準，RS-Ratio 仍照算而誤導。
+  const baseTxt=bd?`前 ${bd.n} 個交易日（${escI(bd.from)}～${escI(bd.to)}）`:"前數個交易日（基準檔未載明日期）";
+  const baseWarn=bd&&bd.stale
+    ? `<div class="ovrrghint" style="color:var(--up);font-weight:700">⚠ 基準已過期：最後一個基準日 ${escI(bd.to)} 距今約 ${bd.gap} 個交易日（未扣國定假日，實際只會更久），可能是夜間基準表排程連續失敗。此時 RS-Ratio 比較的是舊常態，請降低採信度。</div>`
+    : "";
+  const foot=`<div class="ovtfoot">軌跡＝最近 ${nDraw} 個時點（每 ${OV_RRG_STEP} 分一格，最新 ${escI(valid[valid.length-1].hm)}）。`+
+    `x＝RS-Ratio：100 表示該鏈成交佔比與${baseTxt}同時點的常態相同；y＝RS-Mom：100 表示近 ${OV_RRG_LAG} 分鐘相對強弱沒有變化。`+
+    `錨點取成交額前 ${OV_RRG_TOPN} 大（共 ${rows.length} 條全數在圖上）；${impAll.length>OV_RRG_IMPMAX
+      ? `錨點一律標名，改善象限本時點 ${impAll.length} 條、圖上標示近 ${OV_RRG_LAG} 分位移最大的 ${OV_RRG_IMPMAX} 條（其餘 ${impAll.length-OV_RRG_IMPMAX} 條見右側「資金剛輪入」清單，該清單完整列出全部 ${impAll.length} 條）`
+      : `錨點與改善象限（本時點 ${impAll.length} 條）一律標名`}，前 ${OV_RRG_KEEPN} 大或位移異常（z≥${OV_RRG_Z}且Δ佔比≥${OV_RRG_DPP}pp，本時點 ${nOdd} 條；位移異常${RRG_TODD}才可能出現）者保留標籤與尾巴，`+
+    `目前顯示 ${nShow} 條，其餘淡化不標名（滑過可看）。當日成交額 <${OV_RRG_TINY} 億標「極小量」但不剔除——小分母會放大比值，該類位置僅供參考。`+
+    `本圖只描述當下相對${baseTxt}常態的位置與 ${OV_RRG_LAG} 分鐘內的變化，象限位置不等於買賣建議，也不含預測意涵；基準僅取 ${bd?bd.n:5} 個交易日、盤中快照為分鐘級近似。雙指縮放／滾輪放大、拖曳平移、雙擊還原。</div>`;
+  return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+foot;
+}
+// 候補清單互動：切分頁／加入或移出畫布／清除選取
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-ovrrg-tab]");
+  if(t){state.sub.ov.rrgTab=t.dataset.ovrrgTab;render();return;}
+  if(e.target.closest("[data-ovrrg-clear]")){state.sub.ov.rrgPicks=[];render();return;}
+  const p=e.target.closest("[data-ovrrg-pick]");
+  if(!p)return;
+  const name=decodeURIComponent(p.dataset.ovrrgPick), cur=state.sub.ov.rrgPicks||[];
+  state.sub.ov.rrgPicks=cur.includes(name)?cur.filter(x=>x!==name):cur.concat([name]);
+  render();
+});
+// ================= 輪動雷達結束 =================
 function ovTreemapHtml(){
   const st=state.sub.ov;
   // 案二：地圖｜象限視角 pill（狀態存 state.sub.ov.mapView；切換往返各自狀態保留——
   // 象限視角下下鑽狀態不清除，切回地圖仍在原層）
-  const pills=`<button class="seg2 ${st.mapView==="quad"?"":"on"}" data-ovmap="tree">地圖</button>`+
-    `<button class="seg2 ${st.mapView==="quad"?"on":""}" data-ovmap="quad">象限</button>`;
+  const pills=`<button class="seg2 ${st.mapView==="tree"?"on":""}" data-ovmap="tree">地圖</button>`+
+    `<button class="seg2 ${st.mapView==="quad"?"on":""}" data-ovmap="quad">象限</button>`+
+    `<button class="seg2 ${st.mapView==="rrg"?"on":""}" data-ovmap="rrg">輪動雷達</button>`;
+  if(st.mapView==="rrg"){   // 第三視角：RRG 相對輪動圖（產業鏈層盤中軌跡）
+    return `<div class="crumb"><b>資金地圖</b> ${pills} <span class="mut">x=相對強弱 RS-Ratio · y=強弱動能 RS-Mom · 每點=一條產業鏈 · 尾巴=近 ${(OV_RRG_NPT-1)*OV_RRG_STEP} 分軌跡</span></div>`+
+      ovRrgHtml();
+  }
   if(st.mapView==="quad"){
     return `<div class="crumb"><b>資金地圖</b> ${pills}${ovFlowLastBadge()} <span class="mut">x=次產業加權漲跌% · y=盤中資金動向(pp) · 面積=成交佔比 · 前${OV_QUAD_N}大次產業</span></div>`+
       ovQuadrantHtml();
@@ -1521,8 +1948,11 @@ document.addEventListener("click",e=>{
   render();
 });
 // 案二：地圖｜象限視角切換（只切 mapView，不動下鑽狀態→往返保留）
+// 縮放狀態 OV_QUAD_TF 是全域、且象限與輪動雷達共用同一個 #ovQuadZoom 容器，
+// 不重置會讓 A 視角放大平移後切到 B 視角時繼承（規格 §4「切換三個 pill 不互相污染」）。
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-ovmap]"); if(!b)return;
+  if(state.sub.ov.mapView!==b.dataset.ovmap)OV_QUAD_TF={s:1,x:0,y:0};
   state.sub.ov.mapView=b.dataset.ovmap; render();
 });
 // 案二：點象限泡泡 → 切回地圖視角並下鑽該次產業成分股（重用既有第三層鏈路）
@@ -1893,6 +2323,7 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{state.tab=t.dataset.
 async function loadJSON(u){return (await fetch(u,{cache:"no-store"})).json();}
 async function boot(){
   try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+e+'</div>';return;}
+  ovRrgBaseLoad();   // 輪動雷達基準表（data/rrg_base.json）：不 await，缺檔只影響該視角
   await pull(false);
   if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」
   initAuto();

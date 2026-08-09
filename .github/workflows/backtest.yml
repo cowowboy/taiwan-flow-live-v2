@@ -14,11 +14,13 @@ on:
   push:
     paths:
       - 'backtest/**'
+      - 'src/build_rrg_base.py'
       - 'docs/line-cards-spec.md'
       - '.github/workflows/backtest.yml'
   pull_request:
     paths:
       - 'backtest/**'
+      - 'src/build_rrg_base.py'
       - 'docs/line-cards-spec.md'
       - '.github/workflows/backtest.yml'
   workflow_dispatch:
@@ -35,11 +37,20 @@ jobs:
         with:
           python-version: '3.11'
 
+      # src/build_rrg_base.py 不在 backtest/ 底下，但它是 RRG 這條線唯一的離線 builder，
+      # 且和 run_rrg.py 共用同一套口徑（K=5、MIN_COVER=0.9、sub→chain 均分）；掛在這裡是
+      # 因為本 workflow 已經是「離線、不吃 secret、純語法＋煙霧」的守門，其餘 workflow
+      # （aetf/baseline/…）都要 token 或會產生 commit，不適合當語法守門。
       - name: 語法檢查
         run: python -m py_compile backtest/run_sorting.py backtest/test_sorting_smoke.py
+             backtest/run_rrg.py backtest/test_rrg_smoke.py src/build_rrg_base.py
 
       - name: 離線煙霧／回歸測試
         run: python backtest/test_sorting_smoke.py
+
+      # RRG 座標定義的離線煙霧測試（docs/rrg-spec-20260809.md §3「怎麼驗」）
+      - name: RRG 離線煙霧測試
+        run: python backtest/test_rrg_smoke.py
 
       # 測試本身刻意不吃 PYTHONHASHSEED，跑兩個 seed 是要證明它不依賴迭代順序。
       # 若哪天有人在 quintile() 又引進順序相依，這一步會抓到。

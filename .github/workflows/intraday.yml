@@ -17,7 +17,11 @@ on:
 
 permissions:
   contents: write
-  # 不 dispatch pages：data/intraday/ 是回測原料（raw 讀取），前端不讀，不需部署
+  # data/intraday/ 本身是回測原料（raw 讀取）不需部署，但同一步產出的
+  # data/rrg_base.json 是前端以同源相對路徑載入（比照 index.html 內 classify.json 的
+  # fetch 慣例；行號會漂移故不引用，grep `data/classify.json` 可定位），
+  # 沒 dispatch pages 就永遠停在舊版 → 需要 actions: write（2026-08-09 加）
+  actions: write
 
 concurrency:
   group: intraday
@@ -40,6 +44,33 @@ jobs:
           else
             python src/archive_intraday.py
           fi
+      # RRG 同時點基準表：吃剛歸檔的 data/intraday/ 近 5 個有效交易日 ＋ data/baseline.json，
+      # 離線免 token。非交易日（archive 優雅退出、沒新檔）就不跑，免得每天靠 generated_at
+      # 製造無意義 commit 與 pages 部署。
+      #
+      # ★ 這一步「絕不」讓自己的失敗擋到下面的 commit：data/intraday/ 是回測原料、
+      #   KV frame TTL 只有 2 天，一旦當天沒 commit 就永久遺失；而 rrg_base.json 只是
+      #   附屬品，明天再產一份即可。故失敗只記在 outputs.ok，紅燈延到 commit 之後才發
+      #   （見最後一步），達成「資料一定進 git ＋ 失敗仍看得見」兩者兼顧。
+      #   builder 的三條 exit 1（缺 baseline/classify、有效交易日 <3、times 不一致）
+      #   都在寫檔前 return，不會留下半殘檔；仍保險地 checkout 還原，杜絕半寫入被 commit。
+      - name: build rrg base
+        id: rrg
+        run: |
+          if [ -z "$(git status --porcelain data/intraday/)" ]; then
+            echo "data/intraday/ 無新檔（非交易日或優雅退出）→ 跳過 rrg base"
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if python src/build_rrg_base.py; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            echo "::warning::build_rrg_base.py 失敗（exit $rc）→ 保留舊 rrg_base.json，"\
+                 "不影響 data/intraday 歸檔；本次 run 會在 commit 之後才轉紅燈"
+            git checkout -- data/rrg_base.json 2>/dev/null || true
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          fi
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
@@ -48,6 +79,7 @@ jobs:
           # pathspec 錯（2026-07-18 首跑踩到）——先擋
           if [ ! -d data/intraday ]; then echo "no data/intraday（優雅退出）"; exit 0; fi
           git add data/intraday/
+          if [ -f data/rrg_base.json ]; then git add data/rrg_base.json; fi
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -m "intraday archive $(date -u +%FT%TZ)"
           pushed=0
@@ -56,3 +88,21 @@ jobs:
             sleep 4
           done
           if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
+          # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch，
+          # 否則 data/rrg_base.json 進了 repo 卻不會出現在 Pages 站上（同 baseline.yml:46）
+          # （grep 用 if 包住：GitHub Actions 的 bash 帶 -e，裸 `a && b` 失敗會直接讓步驟紅燈）
+          if git diff --name-only HEAD~1 HEAD | grep -q '^data/rrg_base\.json$'; then
+            gh workflow run pages.yml --ref main
+          else
+            echo "rrg_base.json 未變動 → 不 dispatch pages"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # 排在 commit 之後才紅燈：讓 rrg base 的失敗看得見（不被 continue-on-error 靜默吞掉），
+      # 但此時 data/intraday/ 已經 commit + push 完成，不會被連坐弄丟。
+      - name: rrg base 失敗才轉紅燈
+        if: steps.rrg.outputs.ok == '0'
+        run: |
+          echo "::error::build_rrg_base.py 失敗，data/rrg_base.json 未更新"\
+               "（data/intraday/ 歸檔已完成並 push，未受影響）"
+          exit 1
