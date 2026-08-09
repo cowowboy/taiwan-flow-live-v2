@@ -1,6 +1,8 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-08-09（**盤中產業輪動雷達（RRG）上線**：即時一覽第三顆視角 pill，待下個交易日盤中實查）
+最後更新：2026-08-10（**本批 Worker 改動已部署**：deploy version `0ad82dc4`、commit `ab8c766`，
+線上健康檢查通過；行為面待驗項見「快速接手」的待驗清單）
+前一版：2026-08-09（**盤中產業輪動雷達（RRG）上線**：即時一覽第三顆視角 pill，待下個交易日盤中實查）
 
 ## 快速接手
 
@@ -110,7 +112,7 @@
     - 註：下方「7a 盤中歸檔＋權重月更」段其實早已記過「2026-07-18.json 是週六 stale 資料」，
       只是本段的「順帶發現」條目當時沒連到它。
 
-- **✅ 已修（2026-08-09，尚未部署）：`appendSeries` 的 lost update 競態（同日追查「07-30 series 少 1 筆」時發現）**：
+- **✅ 已修（2026-08-09，已於 2026-08-10 凌晨部署 version `0ad82dc4`，commit `ab8c766`）：`appendSeries` 的 lost update 競態（同日追查「07-30 series 少 1 筆」時發現）**：
   單一 KV key 做 get-modify-put、CF KV 無 CAS，每分鐘一班的 frame cron 互相覆蓋。
   **這是既有取捨的延伸、不是同一件事**——`storeFrame` 區塊註解明文接受的是「**單筆漏格**不影響判讀」，
   **亂序與重複點並不在被接受的範圍內**。
@@ -140,7 +142,7 @@
   - **殘留風險（現在式，既有理由涵蓋不到）**：漏格無害成立，但**亂序與重複點**會讓
     `export function seriesTail` 的 `.slice(-n)`（n=60）**末筆不是最新的一分鐘**；且任何未來對
     `series` 做「取最後一筆」或「相鄰差分」的消費者都會**靜默算錯**，不會拋錯。
-  - **修法（已實作，2026-08-09；皆在 `worker/src/index.js`，尚未部署）**：
+  - **修法（已實作，2026-08-09；皆在 `worker/src/index.js`，已於 2026-08-10 凌晨部署 version `0ad82dc4`）**：
     - 新增 `export function mergeSeriesPoint` 與 `function pickSeriesDup`；
       `export async function appendSeries` 原本「只比對最後一筆」的三行 push／覆寫，
       改成一行 `mergeSeriesPoint(...)`——**以 `t` 為鍵對全陣列去重、put 前 sort by t**。
@@ -247,7 +249,7 @@
     289KB 遠低於門檻，**無整批連坐**。註：原記錄寫「1040×4812／292KB」，實際 4998px／289KB，
     屬**當日內容長度差異、非缺陷**（上方數字已更正）。
   - **② ❌ 推播掛圖未達成** → 已升格為獨立問題，見下一條「盤後圖卡推播時序錯位」
-    （**2026-08-09 已實作修正、尚未部署**）。
+    （**2026-08-09 已實作修正，已於 2026-08-10 凌晨部署 version `0ad82dc4`；行為面待 2026-08-10（週一）22:00 起的晚場班實測**）。
   - **③ ⏳「實機看 bubble 呈現」仍未驗**（官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
     **前置條件是先修好下一條的時序問題**——圖根本沒掛上推播，就沒有 bubble 可看。
     另記一筆**觀測缺口**：`pushDailyCards` **完全沒有呼叫 `recordJob`**（`worker/src/index.js`
@@ -257,9 +259,9 @@
     實查 08-07 與 08-06 的 `/jobs` 各 19 筆事件、**皆無 cards**。
     **LINE 是否送達只有使用者手機看得到，無法從外部確認**。
     → **觀測缺口已於 2026-08-09 補上**（`pushDailyCards` 新增 5 個 `recordJob` 呼叫點，
-    見下一條的「觀測」項；尚未部署）；但「是否送達」這點仍只有使用者手機看得到。
+    見下一條的「觀測」項；已於 2026-08-10 凌晨部署 version `0ad82dc4`）；但「是否送達」這點仍只有使用者手機看得到。
 
-- **✅ 已修（2026-08-09，尚未部署）：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
+- **✅ 已修（2026-08-09，已於 2026-08-10 凌晨部署 version `0ad82dc4`，commit `ab8c766`）：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
   （同日追 08-07 長文卡驗收時挖出的**系統性問題**，非單一事件）：
   - **機制（已驗證，程式碼佐證；以下為修正前的行為）**：`.github/workflows/cards.yml` 的 cron 是 `'12 14 * * 1-5'`
     （grep 此字面量即得）＝台北 22:12，但 **GitHub schedule 實際延遲 54 分~2 小時 25 分**；
@@ -277,7 +279,7 @@
   - **文件裡的錯誤假設**：`cards.yml` 註解寫的「22:12 渲染 → 22:30 推播剛好（~46 分餘裕）」
     在 GH cron 實際延遲下**不成立**；而本段下方「Worker 升格全系統主排程」的「待改進①」其實早記過
     「GH cron 兜底 schedule run 仍延遲約 1.5-2.5h」，**只是沒人把它連到 cards 班**。
-  - **修法（兩案都做，已實作 2026-08-09；皆在 `worker/src/index.js`，尚未部署）**：
+  - **修法（兩案都做，已實作 2026-08-09；皆在 `worker/src/index.js`，已於 2026-08-10 凌晨部署 version `0ad82dc4`）**：
     - **生產端**：新增 `export const CARDS_RENDER_AFTER_MIN`（台北 **22:00**）與
       `export async function runCardsRender`，`export async function runEvening` 在 `export async function runAetf2` 與
       `pushDailyCards` 之間插一步。**掛在既有晚場班上，`worker/wrangler.toml` 的 `crons[]` 一條沒動**。
@@ -309,17 +311,43 @@
       **這不是缺陷**：manifest 等到窗尾就不再走等待分支，而是往下走完整推播流程並記終局
       `pushed`（或 `error`），**觀測不會留白**。
 
-- **⏳ 待驗清單（上述兩條修正上線後的第一個交易日晚上要看）**：
+- **✅ 本批 Worker 改動已部署（2026-08-10 凌晨，台北）**：`cd worker && npm run deploy`，
+  **deploy version `0ad82dc4-2d36-49d3-be2d-7043f92369b3`（短碼 `0ad82dc4`）、commit `ab8c766`**。
+  部署後線上健康檢查通過（**已驗證，實打線上端點**）：`/live` HTTP 200、**2771 檔個股**、
+  **47 條產業鏈**，頂層結構完整（`chain`／`chain_coverage`／`exchange`／`flow`／`flow_last`／
+  `futures`／`generated_at`／`index`／`market`／`series`／`stock_cols`／`stocks`）且**無 `error` 欄**；
+  `/replay?t=11:00` HTTP 200 並正確走「該時段無盤中資料」分支；`/jobs?date=20260809` 正常回應
+  （**08-09 為週日、無晚場班事件，符合預期**）。
+  ⚠️ **這只證明部署成功且端點健康，不等於下列行為面待驗項已驗**。
+
+- **⏳ 待驗清單（部署已完成，但以下全部仍未驗。第一次實測機會＝2026-08-10（週一）22:00 起的
+  晚場班，屆時看 `/jobs?date=20260810`；原記錄寫「上線後第一晚／明天晚上」等相對時間，
+  2026-08-10 改為絕對日期以免下個 session 再度失準）**：
   - `CARDS_RENDER_AFTER_MIN` 取 **22:00 是推算不是實測**：`aetf.yml` 從 dispatch 到 `diff.json`
-    push、`cards.yml` 渲染各需幾分鐘，都只有**間接記載**。上線後第一晚要看 `/jobs?date=` 的
-    `cards-render` 紀錄與 manifest `generated_at` 的**實際落差**，必要時調整這個門檻。
+    push、`cards.yml` 渲染各需幾分鐘，都只有**間接記載**。**2026-08-10（週一）晚上**要看
+    `/jobs?date=20260810` 的 `cards-render` 紀錄與 manifest `generated_at` 的**實際落差**，
+    必要時調整這個門檻。**部署成功不構成驗證**。
   - `AbortSignal.timeout` 在 **workerd 的實際行為未實測**（Node 22 上驗過會 abort）。
     workerd 若不支援會落到 `AbortController` 分支，兩者都沒有則回 `undefined` 維持舊行為
-    ——**不會因此讓抓取失敗**，但也就等於沒有逾時保護。
+    ——**不會因此讓抓取失敗**，但也就等於沒有逾時保護。已部署不代表已測到——**要看盤中
+    （2026-08-10 起 09:00–13:59）真的發生一次 FinMind 慢回應才驗得到**。
   - **LINE 是否真的送達仍只有使用者手機看得到**：`recordJob` 記的是「LINE API 回 200」
     **不是「使用者收到」**，`lf=attached` 也只證明 image message 塞進 payload。
-    **「實機看 bubble 呈現」仍需使用者本人確認**（承上方長文卡條目的 ③）。
-  - **本批 Worker 改動尚未部署**——需 `cd worker && npm run deploy`。
+    **「實機看 bubble 呈現」仍需使用者本人確認**（承上方長文卡條目的 ③）——尤其**超長直圖
+    （1040×4998）在聊天室怎麼裁**，官方無明文，只有手機看得到。最快 **2026-08-10（週一）晚上**
+    的推播可看。
+  - **`GH_DISPATCH_TOKEN` 對本 repo（`taiwan-flow-live-v2`）的 scope 仍是推論、未直接證實**
+    （見 `CLAUDE.md`「驗證方式」段的 2026-08-09 更正）。**直接證據＝第一次 `cards.yml`
+    workflow_dispatch 回 204**，即 `export async function runCardsRender` 上線後第一個交易日
+    晚上（**2026-08-10（週一）22:00 起**），用 `npx wrangler tail` 或 GitHub run 歷史看。
+    部署成功**完全不觸及**這點。
+  - **KV 既有髒資料的自癒未驗**：`mergeSeriesPoint` 宣稱「下一次 append 就清乾淨」，
+    要看 **2026-08-10 起盤中新寫入的 `series:<date>`** 是否維持**嚴格遞增、無重複 `t`**
+    （離線測試只證明函式本身正確，沒證明線上 KV 的既有亂序點真的被覆寫掉）。
+  - **無 CAS 併發下的實際收斂無法用 mock KV 重現**：`worker/test/series.mjs` 的可交換性窮舉
+    是**單執行緒模擬**，真正的多班次同時 get-modify-put 只有線上跑得出來。
+    要看連續數個交易日的 `series` 是否不再出現時序逆轉（基準：13 個交易日出過 1 次，
+    ≈0.03%，**樣本數要夠才有結論**）。
 
 - **✅ 已結案：CF cron dow 慣例錯誤，13 條 cron 星期五全不觸發、星期日誤觸發**
   （2026-07-31 定案並部署 version `f13ab220`；**08-02 週日與 08-07 週五兩次驗收皆通過**——
