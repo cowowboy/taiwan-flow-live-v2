@@ -67,6 +67,15 @@ ZEXT = 3
 # 「缺格往前回退 ≤5 分鐘」會讓相鄰兩個請求時點拿到同一格 frame，位移就是
 # 「幾乎但不完全等於 0」。門檻取 1e-9，與前端實作一致。
 MAD_EPS = 1e-9
+# 淨位移退化門檻：這是 `net <= 0` / `tnet > 0` 的浮點安全版本，**不是換判準、也不是放寬門檻**。
+# 同型於 MAD_EPS，但守的是**另一個量**——traj_stats 的「比值中位」把淨位移
+# math.dist(pts[0], pts[-1]) 當分母，軌跡繞一圈回到原點時它「幾乎但不完全等於 0」：
+# 座標走 (100*share)/base，起點與終點只要差 1 ULP，dist 就落在 1e-13 量級而非 0，
+# `net > 0` 會成立，jit = 步中位 / 1e-13 直接噴到天文數字並汙染比值中位的樣本。
+# 另立常數而非沿用 MAD_EPS：MAD_EPS 是「離差估計量退化」、本常數是「淨位移退化」，
+# 兩者觸發條件不同（前者位移全同、後者首尾重合），日後要單獨調其一才不會誤動另一個；
+# 量級相同是因為兩者都活在同一個 RS 座標空間（RS_Ratio／RS_Mom 以 100 為中心）。
+NET_EPS = 1e-9
 MIN_COVER = 0.9           # 日檔至少要有 90% 時點有市場總額才算有效交易日
 TIERS = [("≥3%", 3.0, 1e9), ("1~3%", 1.0, 3.0), ("0.5~1%", 0.5, 1.0), ("<0.5%", 0.0, 0.5)]
 BIG_TIERS = ("≥3%", "1~3%", "0.5~1%")   # 「非小基數」＝終盤 share ≥0.5%
@@ -242,10 +251,10 @@ def traj_stats(coords, names, idx, tiers):
             tp = pts[-WIN:]
             if len(tp) >= 3:
                 tnet = math.dist(tp[0], tp[-1])
-                if tnet > 0:
+                if tnet > NET_EPS:   # 尾巴首尾重合（含浮點殘渣）→ 不列入比值
                     jit_tail.append(st.median([math.dist(a, b)
                                                for a, b in zip(tp, tp[1:])]) / tnet)
-            if net <= 0:
+            if net <= NET_EPS:       # 全日淨位移退化（含浮點殘渣）→ 不列入比值
                 continue
             jit_all.append(sm / net)
             eff.append(sum(ds) / net)

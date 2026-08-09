@@ -1229,6 +1229,10 @@ const OV_RRG_BASE_STALE=3;                           // base 最後一天距今�
 // ---- 基準表（data/rrg_base.json）：比照 classify.json 的同源相對路徑載入 ----
 // 檔案可能尚未產出（builder 另案），失敗時整頁不受影響，只有本視角顯示降級文案。
 let OV_RRG_BASE=null, OV_RRG_BASE_IDX=null, OV_RRG_BASE_ERR=null, OV_RRG_BASE_REQ=false;
+// 本次 ovRrgHtml() 是否真的畫出圖（false＝四條降級路徑之一／載入中）。
+// 麵包屑的軸說明在沒有圖時等於在描述一張不存在的圖，故由呼叫端（ovTreemapHtml）
+// 依此旗標決定要不要印——務必「先呼叫 ovRrgHtml() 再組麵包屑」，順序反了旗標會是上一輪的值。
+let OV_RRG_DREW=false;
 function ovRrgRepaint(){ if(state.tab==="ov"&&state.live&&state.cl)renderOverview(); }
 function ovRrgBaseLoad(){
   if(OV_RRG_BASE||OV_RRG_BASE_REQ)return;
@@ -1431,6 +1435,7 @@ function ovRrgSideHtml(rows,picks){
     `<div class="ovrrghint">點一下把該產業鏈加入畫布（顯示標籤與尾巴），再點取消。清單取自全部 ${rows.length} 條產業鏈，不受畫布 Top ${OV_RRG_TOPN} 限制；本頁列出「${want}」象限<b>全部 ${list.length} 條</b>（不截斷，可捲動），排序＝近 ${OV_RRG_LAG} 分位移。</div></div>`;
 }
 function ovRrgHtml(){
+  OV_RRG_DREW=false;      // 只有走到最後真的產出 SVG 才翻 true（見宣告處）
   ovRrgBaseLoad();
   // 降級①：基準表缺失／載入中（builder 另案產出，缺檔時只有本視角降級，其他視角不受影響）
   if(!OV_RRG_BASE){
@@ -1587,6 +1592,7 @@ function ovRrgHtml(){
       : `錨點與改善象限（本時點 ${impAll.length} 條）一律標名`}，前 ${OV_RRG_KEEPN} 大或位移異常（z≥${OV_RRG_Z}且Δ佔比≥${OV_RRG_DPP}pp，本時點 ${nOdd} 條；位移異常${RRG_TODD}才可能出現）者保留標籤與尾巴，`+
     `目前顯示 ${nShow} 條，其餘淡化不標名（滑過可看）。當日成交額 <${OV_RRG_TINY} 億標「極小量」但不剔除——小分母會放大比值，該類位置僅供參考。`+
     `本圖只描述當下相對${baseTxt}常態的位置與 ${OV_RRG_LAG} 分鐘內的變化，象限位置不等於買賣建議，也不含預測意涵；基準僅取 ${bd?bd.n:5} 個交易日、盤中快照為分鐘級近似。雙指縮放／滾輪放大、拖曳平移、雙擊還原。</div>`;
+  OV_RRG_DREW=true;
   return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+foot;
 }
 // 候補清單互動：切分頁／加入或移出畫布／清除選取
@@ -1609,8 +1615,13 @@ function ovTreemapHtml(){
     `<button class="seg2 ${st.mapView==="quad"?"on":""}" data-ovmap="quad">象限</button>`+
     `<button class="seg2 ${st.mapView==="rrg"?"on":""}" data-ovmap="rrg">輪動雷達</button>`;
   if(st.mapView==="rrg"){   // 第三視角：RRG 相對輪動圖（產業鏈層盤中軌跡）
-    return `<div class="crumb"><b>資金地圖</b> ${pills} <span class="mut">x=相對強弱 RS-Ratio · y=強弱動能 RS-Mom · 每點=一條產業鏈 · 尾巴=近 ${(OV_RRG_NPT-1)*OV_RRG_STEP} 分軌跡</span></div>`+
-      ovRrgHtml();
+    // 先產出內容再組麵包屑：軸說明只在真的畫出圖時才印（降級／載入中時它描述的是一張不存在的圖，
+    // 手機寬度下還白佔兩行）。OV_RRG_DREW 由 ovRrgHtml() 設定，故順序不可對調。
+    const body=ovRrgHtml();
+    const axis=OV_RRG_DREW
+      ? ` <span class="mut">x=相對強弱 RS-Ratio · y=強弱動能 RS-Mom · 每點=一條產業鏈 · 尾巴=近 ${(OV_RRG_NPT-1)*OV_RRG_STEP} 分軌跡</span>`
+      : "";
+    return `<div class="crumb"><b>資金地圖</b> ${pills}${axis}</div>`+body;
   }
   if(st.mapView==="quad"){
     return `<div class="crumb"><b>資金地圖</b> ${pills}${ovFlowLastBadge()} <span class="mut">x=次產業加權漲跌% · y=盤中資金動向(pp) · 面積=成交佔比 · 前${OV_QUAD_N}大次產業</span></div>`+

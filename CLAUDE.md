@@ -34,45 +34,54 @@
 
 台股盤中即時資金流向監控站，同時是「股市雷達」四站家族的**資料中樞**
 （見 `PROJECT_SUMMARY.md`「一句話說明」段）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
-前端是單檔 `index.html`（129KB），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
-資金湧入／資金退出＋摘要分析（`index.html:145-151`）。
+前端是單檔 `index.html`（166KB，2026-08-09 實測 170,046 bytes），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
+資金湧入／資金退出＋摘要分析（`index.html` 的 `<div class="tabs" id="tabs">` 區塊，
+一個 tab 一個 `data-tab` 值）。
 **`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
 
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 14 支）；
-  `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`（10 支＝9 支兜底備援
-  ＋ `canon.yml` 守 CLAUDE.md 頂端的 CANON 區塊）
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 17 支 `.mjs`）；
+  `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`（12 支＝9 支排程
+  builder（多為 Worker 主觸發的兜底備援）＋`canon.yml` 守 CLAUDE.md 頂端的 CANON 區塊
+  ＋`pages.yml` 部署＋`backtest.yml`，後三支無 cron）
 
 ## Worker 哨兵（跨 repo 觸發中樞，改動前必讀）
 
-程式在 `worker/src/index.js` 的 `runSentinel`（:654-675），設計說明 :547-558。
+程式在 `worker/src/index.js` 的 `function runSentinel`，設計說明見其上方的區塊註解
+`// ---- FinMind 哨兵`。
+（本檔引用 `worker/src/index.js` 一律用「可 grep 唯一命中的宣告字串」而非行號，例如
+`function runSentinel`、`const SENTINEL_SIGNALS`；行號會漂移，宣告字串不會。）
 
-- **cron**：`"*/5 9-14 * * 2-6"`（`worker/wrangler.toml:40`；**dow 為 Quartz 慣例，2-6＝週一~五**）＝ UTC 09:00–14:55
-  ＝ **台北 17:00–22:55、週一至五、每 5 分**。程式端二次守門 `scheduledRole`
-  （:632）：`weekday && hour>=17 && hour<23 && minute%5===0` 才回 `sentinel`。
-- **探測法**（`probeSignal` :645-653）：對每個未完成訊號打 FinMind
+- **cron**：`"*/5 9-14 * * 2-6"`（`worker/wrangler.toml` 內 grep 此字面量即得；
+  **dow 為 Quartz 慣例，2-6＝週一~五**）＝ UTC 09:00–14:55
+  ＝ **台北 17:00–22:55、週一至五、每 5 分**。程式端二次守門 `function scheduledRole`：
+  `weekday && hour>=17 && hour<23 && minute%5===0` 才回 `sentinel`。
+- **探測法**（`async function probeSignal`）：對每個未完成訊號打 FinMind
   `dataset=<X>&data_id=2330&start_date=end_date=今日`（最便宜的請求，不掛 cf 快取）。
-- **落地判定** `signalLanded()`（:603-607）：今日資料非空即算落地；`daytrade` 另要求
+- **落地判定** `function signalLanded`：今日資料非空即算落地；`daytrade` 另要求
   某列 `Volume>0`——FinMind 會先出空殼列、量值晚到。
-- **四訊號 → 觸發對象**（`SENTINEL_SIGNALS` :561-570）：
+- **四訊號 → 觸發對象**（`const SENTINEL_SIGNALS`）：
   | 訊號 | dataset | dispatch 目標 |
   |------|---------|---------------|
   | `inst` 法人買賣超 | TaiwanStockInstitutionalInvestorsBuySell | `taiwan-flows` / `daily.yml` |
   | `holding` 集保持股（約 21:00 後） | TaiwanStockShareholding | `taiwan-flows` / `daily.yml`（冪等重跑補持股欄）|
   | `margin` 融資券 | TaiwanStockMarginPurchaseShortSale | `postmkt` / `build.yml` |
   | `daytrade` 當沖（約 21:30 後才非零） | TaiwanStockDayTrading | `postmkt` / `build.yml` |
-- **dispatch**（:611-631）：`POST api.github.com/repos/shihpc/<repo>/actions/workflows/
+- **dispatch**（`export function ghDispatchRequest` 建 URL／`async function ghDispatch(env`
+  送出）：`POST api.github.com/repos/shihpc/<repo>/actions/workflows/
   <wf>/dispatches`，body `{ref:"main"}`，回應非 204 即拋錯。
-- **冪等**：KV 鍵 `sentinel:<YYYYMMDD>:<signal>`（`sentinelKey` :602），值 `"dispatched"`，
-  TTL 172800（2 天）（:668）；四訊號全寫入則當晚短路，只讀 KV 不打 FinMind（:656-658）。
-- **dispatch 失敗不寫 KV**（:670-673）→ 下一輪（5 分後）自動重試。
+- **冪等**：KV 鍵 `sentinel:<YYYYMMDD>:<signal>`（`export const sentinelKey`），值 `"dispatched"`，
+  TTL 172800（2 天）；四訊號全寫入則當晚短路，只讀 KV 不打 FinMind
+  （`function runSentinel` 開頭的 `done.every(Boolean)`）。
+- **dispatch 失敗不寫 KV**（`function runSentinel` 內 `ghDispatch` 的 catch 分支，
+  只 log 不寫 KV）→ 下一輪（5 分後）自動重試。
 - **不變式：下游 GitHub cron 全數保留為兜底，一條不刪**
   （見 `PROJECT_SUMMARY.md`「快速接手」的「Worker 升格全系統主排程」段）——
   `taiwan-flows/daily.yml` 台北 21:19、`postmkt/build.yml` 21:53，兩管線冪等，重跑無害。
 
-## 其他 scheduled 角色（分流入口 `dispatchRoleForCron` :779 → `scheduledRole` :589）
+## 其他 scheduled 角色（分流入口 `export function dispatchRoleForCron` → `export function scheduledRole`）
 
 - `frame`：台北 09:00–13:59 每分鐘存 KV frame ＋ `runAlerts`
 - `news`：每日（含週末）06:07–22:07 每小時 :07 → `taiwan-stock-news/build-news.yml`
@@ -92,7 +101,7 @@
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 部署
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 13 支要個別跑（離線、免 token）
+node test/sentinel.mjs              # 其餘 16 支要個別跑（離線、免 token）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 

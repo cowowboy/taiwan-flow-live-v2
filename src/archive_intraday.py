@@ -11,7 +11,20 @@
 #      口徑與 Worker computeFlow 一致：每檔對其 p 去重後的每個次產業各加一次（多對多）。
 #      個股層級太大不存——回測主角本來就是次產業。
 #   4. 輸出 data/intraday/YYYY-MM-DD.json（欄名精簡，實測 <300KB，遠低於 2MB 上限）。
-#   5. 非交易日/frame 全缺 → 印訊息 exit 0 不寫檔（優雅退出）；個別時點缺格 → 該時點記 null。
+#   5. 非交易日/frame 全缺，或命中率 <MIN_COVER → 印訊息 exit 0 不寫檔（優雅退出）；
+#      個別時點缺格（但整體達標）→ 該時點記 null。
+#      MIN_COVER 與下游 src/build_rrg_base.py、backtest/run_rrg.py 同口徑同命名（0.9）：
+#      下游本來就會把低覆蓋率日檔剔除，這裡先擋住就不會產生「寫進 git 卻沒人用」的殘檔。
+#      殘檔的來源實例：2026-07-18（週六手動首跑，KV 剛好殘留 1 格 frame → 命中 1/54 仍寫檔）。
+#      務必維持 return 0（優雅退出）而非硬錯誤。理由不是「怕弄丟當日歸檔」——走到守門這條
+#      分支，依定義就是「這天沒有可寫的有效歸檔」，改成非 0 一格資料也不會多丟；真正的理由是：
+#      (a) 契約一致：同一函式對「沒東西可寫」的兩種情境（上面的 n_hit == 0 與這裡的低覆蓋率）
+#          必須給同一個退出碼，否則 .github/workflows/intraday.yml 得對同一件事分兩種語意處理；
+#      (b) 訊號不稀釋：非交易日（平日的國定假日照樣觸發 cron '10 6 * * 1-5'）與低覆蓋率都是
+#          預期內結果，用紅燈表達會讓 intraday.yml 的失敗訊號失去鑑別力，真故障被淹沒。
+#      附帶事實（不是理由）：非 0 會讓 archive 步驟紅燈（該步驟是裸 python、GH Actions 的
+#      bash 帶 -e），後面 build rrg base 與 commit 兩步都被跳過；但這兩步在本分支本來就是
+#      空轉（沒新檔 → 跳過 / no change），所以非 0 沒有任何實質收益，只有上述兩項代價。
 #
 # KV 讀量估算（寫給未來自己）：54 時點 × ≤6 get（缺格回退上限）＋ series 1 get ≈ ≤325 讀/日，
 #   遠低於 Cloudflare KV 免費額度 10 萬讀/日；Worker 端另有 max-age=60 快取吸收重試。
@@ -34,6 +47,7 @@ WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
 OUT_DIR = ROOT / "data" / "intraday"
 TPE = timezone(timedelta(hours=8))
 HEADERS = {"User-Agent": "archive-intraday/1.0"}
+MIN_COVER = 0.9   # 時點命中率低於此就不歸檔（同 src/build_rrg_base.py、backtest/run_rrg.py）
 
 
 def get_json(url: str, retries: int = 3) -> dict:
@@ -114,6 +128,16 @@ def build(date: str) -> int:
     if n_hit == 0:
         # 非交易日 / frame 全缺（TTL 已過或當日停班）→ 優雅退出，不寫檔
         print(f"{date}：全部 {len(times)} 個時點皆無 frame（series {len(series)} 筆）→ 不歸檔，正常退出")
+        return 0
+
+    need = -(-int(MIN_COVER * len(times) * 1000) // 1000)   # ceil(MIN_COVER × 時點數)，避開浮點誤差
+    cover = n_hit / len(times)
+    if cover < MIN_COVER:
+        # 覆蓋率不足（非交易日手動 dispatch 但 KV 殘留零星 frame／frame 班或 KV 中途出事）
+        # → 優雅退出不寫檔。寫了下游 build_rrg_base.py / run_rrg.py 也會以同一門檻剔除。
+        print(f"{date}：命中 {n_hit}/{len(times)} 時點（覆蓋率 {cover * 100:.1f}%），"
+              f"低於門檻 MIN_COVER={MIN_COVER * 100:.0f}%（至少需 {need} 格）"
+              f"→ 不歸檔（避免低覆蓋率殘檔，例：2026-07-18），正常退出")
         return 0
 
     out = {

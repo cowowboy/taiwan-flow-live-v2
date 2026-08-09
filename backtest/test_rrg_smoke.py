@@ -17,6 +17,11 @@
 #   但盤中一定會撞：Worker /replay 的「缺格往前回退 ≤5 分鐘」會讓相鄰兩個請求時點
 #   拿到同一格 frame。現在改用 MAD_EPS=1e-9。見 test_zscore_pool_survives_float_dust。
 #
+#   traj_stats() 有同型問題：`net <= 0` / `tnet > 0` 拿淨位移當比值分母，軌跡繞一圈
+#   回到起點時淨位移在浮點下是 1e-14 而非 0，比值噴到天文數字並汙染「比值中位」的樣本。
+#   後果比 z 那個輕（只動報告統計量、不產出誤標名單、traj_stats 不上線），但同型要同型守。
+#   現在改用 NET_EPS=1e-9。見 test_traj_stats_survives_float_dust。
+#
 # 用法：python backtest/test_rrg_smoke.py（免 token、免網路、免快取）
 
 from __future__ import annotations
@@ -156,6 +161,42 @@ def test_traj_stats_skips_incomplete_and_zero_net():
     loop = {"Y": [(100.0, 100.0), (110.0, 100.0), (100.0, 100.0)]}
     jb, _, _, sm, nm, _ = rr.traj_stats(mk_coords(loop), ["Y"], idx, tiers)
     check("淨位移為 0 → 不列入比值（避免除以 0）", jb == [] and len(sm) == 1 and close(nm[0], 0.0))
+
+
+def test_traj_stats_survives_float_dust():
+    """守浮點退化，與 test_zscore_pool_survives_float_dust 同型（分母是浮點殘渣）。
+
+    traj_stats 的「比值中位」拿淨位移 math.dist(pts[0], pts[-1]) 當分母。軌跡繞一圈
+    回到起點時，淨位移在浮點下不會剛好是 0——座標走 (100*share)/base，首尾差 1 ULP
+    就讓 dist 落在 1e-14 量級而非 0。舊的 `net > 0` 判斷放行後，分子是真實的步長中位、
+    分母是浮點殘渣，比值噴到天文數字並汙染樣本。後果比 z 那個輕（只動報告的統計量、
+    不產出誤標名單、traj_stats 也不上線），但同型問題應該同型守法。
+    """
+    # 首尾差 1 ULP：淨位移是「幾乎但不完全等於 0」，不是剛好 0
+    end = math.nextafter(100.0, math.inf)
+    idx = list(range(6))                      # 6 點 → 尾巴版（末 WIN=6 點）也吃得到同一條
+    loop = {"DUST": [(100.0, 100.0), (110.0, 100.0), (110.0, 110.0),
+                     (100.0, 110.0), (105.0, 100.0), (end, 100.0)]}
+    tiers = {("d1", "DUST"): "≥3%"}           # 非小基數 → 同時檢查 jit_big 分支
+
+    raw_net = math.dist((100.0, 100.0), (end, 100.0))
+    check("合成軌跡的淨位移是浮點殘渣（>0 但 ≤ NET_EPS）",
+          0.0 < raw_net <= rr.NET_EPS)
+    step_med = stats.median([math.dist(a, b)
+                             for a, b in zip(loop["DUST"], loop["DUST"][1:])])
+    would_be = step_med / raw_net
+    check(f"舊的 `net > 0` 門檻會給出比值≈{would_be:.1e}（天文數字＝汙染比值中位）",
+          would_be > 1e12)
+
+    ja, jbig, jtail, sm, nm, ef = rr.traj_stats(mk_coords(loop), ["DUST"], idx, tiers)
+    check("全日版：浮點殘渣淨位移不列入比值", ja == [])
+    check("非小基數版：同樣不列入", jbig == [])
+    check("尾巴版：`tnet > 0` 同型守門，也不列入", jtail == [])
+    check("路徑效率不列入（同一個分母）", ef == [])
+    # 描述性統計（步長中位／淨位移中位）不受守門影響——它們不做除法，照樣要記錄
+    check("步長中位仍照記（不做除法，不受守門影響）",
+          len(sm) == 1 and close(sm[0], step_med))
+    check("淨位移中位仍照記為浮點殘渣本身", len(nm) == 1 and close(nm[0], raw_net))
 
 
 def test_quad_stats():
@@ -393,6 +434,7 @@ def main():
                test_mom_from_ratio, test_sample_idx,
                test_traj_stats_straight_beats_zigzag,
                test_traj_stats_skips_incomplete_and_zero_net,
+               test_traj_stats_survives_float_dust,
                test_quad_stats,
                test_disp_series_carries_dpp, test_zscore_pool_flags_the_jump,
                test_zscore_pool_win_needs_min_win, test_zscore_pool_skips_zero_mad,

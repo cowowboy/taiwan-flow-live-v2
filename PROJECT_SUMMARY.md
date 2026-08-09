@@ -5,7 +5,8 @@
 ## 快速接手
 
 - **盤中產業輪動雷達（RRG）上線（2026-08-09，commit `da144ca`，已 push＋部署成功）**：
-  「即時一覽（ov）」資金地圖的**第三顆視角 pill**（`地圖｜象限｜輪動雷達`，`index.html:1606-1613`，
+  「即時一覽（ov）」資金地圖的**第三顆視角 pill**（`地圖｜象限｜輪動雷達`，`index.html` 的
+  `function ovTreemapHtml` 內 `data-ovmap="rrg"` 那顆，
   狀態 `state.sub.ov.mapView="rrg"`）。x=RS-Ratio 相對強弱、y=RS-Mom 強弱動能，每點＝一條產業鏈、
   尾巴＝近數十分鐘軌跡。**前端函式群一律 `ovRrg*` 前綴——勿與既有 `ovRadar*`（盤中異動雷達）混淆**，
   兩者是不同功能。
@@ -46,27 +47,89 @@
       （正常交易日 276 筆）。覆蓋率 1/54＝1.9%。
     - **成因（已驗證）**：**2026-07-18 是星期六、非交易日**。該檔是 7a 盤中歸檔管線上線當晚在週六手動
       `workflow_dispatch` 的首跑測試（run `29641474219`，commit `44a96dc`），**不是排程班**——
-      `.github/workflows/intraday.yml` 的 cron 是 POSIX `'10 6 * * 1-5'`（`:10`），週六本來就不跑。
+      `.github/workflows/intraday.yml` 的 cron 是 POSIX `'10 6 * * 1-5'`（grep 此字面量即得），週六本來就不跑。
     - **那唯一一格哪來的（推測，非已驗證）**：KV 裡的 `12:19` frame **推測**是當天人工測試 `/snap`
       留下的殘留（同型前例見下方 07-25 手動打 `/snap?force=1` 寫入 `f:2026-07-25:22:51` 那條）。
       KV frame TTL 僅 2 天，現已無法直接驗證，**此為推測**。
-    - **為何檔案照樣寫成功（已驗證）**：`src/archive_intraday.py:114` 的優雅退出只擋 `n_hit == 0`，
+    - **為何檔案照樣寫成功（已驗證）**：`src/archive_intraday.py` 的優雅退出只擋 `if n_hit == 0:`，
       07-18 的 `n_hit == 1` 故沒觸發；而它「能成功」也正因為只命中 1 格——舊版補格邏輯對**同一次產業
       的第二個命中時點**必炸 `IndexError`，所以 07-20、07-21 兩支排程 run 都在 archive 步驟 failure
       （該 bug 已由 commit `d85e49f`（07-22）修掉，見下方「intraday 歸檔修復＋搶救」段）。
     - **還會不會再發生**：① IndexError → 已修（`d85e49f`）；② 週末誤觸發 → 已被 07-31 CF cron dow
       事故定案涵蓋（deploy version `f13ab220`，08-02 週日驗收通過），**自動排程路徑不會再產生這種檔**；
-      ③ **但守門仍是漏的（現在式）**——`src/archive_intraday.py` 至今只擋 `n_hit == 0`、**沒有最低
-      覆蓋率門檻**。殘檔仍可能出自兩條路：(a) 非交易日手動 dispatch 且 KV 恰有殘留 frame；
-      (b) 交易日中途 frame 班或 KV 出事、只落到零星幾格。下游是安全的（`src/build_rrg_base.py:73`
-      與 `backtest/run_rrg.py:70` 的 `MIN_COVER = 0.9` 會把它剔除），所以這是**資料衛生問題、非功能故障**。
-    - **待辦（尚未實作）**：把 `archive_intraday.py:114` 的 `n_hit == 0` 改成
-      `n_hit < len(times) * 0.9`，或至少對低覆蓋率印 warning。
+      ③ **守門已補上（2026-08-09，與本段同一批改動）**——原本 `src/archive_intraday.py` 只擋
+      `if n_hit == 0:`、**沒有最低覆蓋率門檻**，殘檔可能出自兩條路：(a) 非交易日手動 dispatch
+      且 KV 恰有殘留 frame；(b) 交易日中途 frame 班或 KV 出事、只落到零星幾格——**兩條現在都被
+      新門檻擋下**（見下一條）。下游本來就是安全的（`src/build_rrg_base.py` 與 `backtest/run_rrg.py`
+      的 `MIN_COVER = 0.9` 會把它剔除），所以這始終是**資料衛生問題、非功能故障**；
+      本次只是把剔除點從下游前移到源頭。
+    - **✅ 已實作：`archive_intraday.py` 低覆蓋率守門（2026-08-09，與本段同一批改動）**：
+      新增 `MIN_COVER = 0.9` 常數（**與 `src/build_rrg_base.py`、`backtest/run_rrg.py` 同名同值**），
+      命中率低於門檻即印訊息不寫檔。要點：
+      - **一律 `return 0`（優雅退出），絕不用非 0 退出**。理由**不是**「非 0 會弄丟當日歸檔」——
+        走到守門分支依定義就是「這天沒有可寫的有效歸檔」，且一次 run 只處理一個日期、跑在
+        fresh checkout 上，非 0 一格資料也不會多丟。**成立的理由有二**：
+        ① **契約一致**——同一函式對「沒東西可寫」的兩種情境（既有的 `if n_hit == 0:` 與新的
+        低覆蓋率）必須給同一個退出碼，否則 workflow 得對同一件事分兩種語意處理；
+        ② **訊號不稀釋**——非交易日（平日的國定假日照樣觸發 cron `'10 6 * * 1-5'`）與低覆蓋率
+        都是預期內結果，用紅燈表達會讓 `intraday.yml` 的失敗訊號失去鑑別力，真故障被淹沒。
+        （**附帶事實、不是理由**：非 0 確實會讓 `archive intraday` 步驟紅燈——該步驟是裸
+        `python`、GH Actions 的 bash 帶 `-e`——並讓後面 `build rrg base` 與 `commit` 兩步
+        全部跳過；但這兩步在本分支本來就空轉，故非 0 無任何實質收益，只有上述兩項代價。）
+      - **既有歸檔路徑不受影響（已驗證）**：不寫檔時 `git status --porcelain data/intraday/` 為空
+        → `build rrg base` 步驟自行跳過（該步驟開頭就是這個判斷）、`commit` 步驟走
+        「no change; exit 0」。
+      - **實測五種情境（已驗證）**：54/54 寫檔、1/54 不寫檔、0/54 維持原行為、
+        48/54（88.9%）不寫檔、49/54（90.7%）寫檔。
+      - **回頭掃現有 14 個 `data/intraday/*.json`（已驗證）**：只有 `2026-07-18`（1/54）會被新門檻
+        擋下，13 個 100% 的**都不受影響、無誤傷**。
+      - **注意（仍然成立，勿當成同一件事）**：`MIN_COVER` 在三支腳本的**語意不完全相同**——下游
+        兩支寫的是 `sum(1 for v in tot if v) / len(tot)`（`src/build_rrg_base.py`、
+        `backtest/run_rrg.py` 各自的 `cover = ` 那行），算的是日檔 `total` 陣列裡**truthy** 的
+        比例：`None` 與**數值 `0`** 都被當缺格；`archive_intraday.py` 算的是「本次抓取命中
+        frame 的比例」，只看有沒有 frame、不看金額。同一天數值一致（命中的時點 `total[i]` 是
+        全市場累積成交額、實務上不可能為 0），但這是**巧合而非定義相同**，日後若改 `total`
+        的補值邏輯（例如缺格改補 `0` 而非 `None`）要三支一起看。
+      - **待決事項**：既有的 `data/intraday/2026-07-18.json` 殘檔**仍在 repo 裡**——本次只擋未來、
+        **沒刪舊檔**（下游本來就會用 `MIN_COVER` 剔除它，故無害）。要不要刪**尚未決定**。
     - **全目錄掃描（已驗證，14 檔）**：除 07-18（1/54＝1.9%）外，其餘 **13 檔全部 54/54＝100%**，
       **沒有第二個殘檔**。缺席的交易日只有 07-24、07-31（CF cron dow bug，frame 樣本永久遺失，已結案）；
       07-26 週日死資料已由 commit `220adca` 刪除。**實際可用回測樣本＝13 個交易日**。
     - 註：下方「7a 盤中歸檔＋權重月更」段其實早已記過「2026-07-18.json 是週六 stale 資料」，
       只是本段的「順帶發現」條目當時沒連到它。
+
+- **🟡 已知未修：`appendSeries` 的 lost update 競態（2026-08-09 追查「07-30 series 少 1 筆」時發現）**：
+  單一 KV key 做 get-modify-put、CF KV 無 CAS，每分鐘一班的 frame cron 互相覆蓋。
+  **這是既有取捨的延伸、不是同一件事**——`storeFrame` 區塊註解明文接受的是「**單筆漏格**不影響判讀」，
+  **亂序與重複點並不在被接受的範圍內**。
+  - **現象（已驗證）**：`data/intraday/2026-07-30.json` 的 `series` 只有 **275 筆**，其餘 12 個交易日
+    皆 276 筆，缺 `11:39`；更關鍵的是 `11:41` 排在 `11:40` **前面**（全 13 日唯一一次時序逆轉），
+    且 `11:40` 與 `11:41` 的 `amt`／`idx`／`chg` **byte 完全相同**（25391.6／40280.45／241.27）。
+  - **根因（已驗證）**：`worker/src/index.js` 的 `export async function appendSeries` 對單一 KV key
+    `series:<date>` 做 get-modify-put，**CF KV 沒有 CAS**；`worker/wrangler.toml` crons[0]
+    `"* 1-5 * * 2-6"` 每分鐘一班，而 `hm` 取自 `event.scheduledTime`（`export async function storeFrame`
+    內的 `taipeiParts(new Date(scheduledTime ...))`）**而非實際執行時間**，慢班會用自己的標籤
+    在較晚的牆鐘時刻寫入。放大器：`storeFrame` 內 `snap()` 失敗會 sleep 1500ms 重試一次，
+    且 `async function finSnapshot` 的 `fetch` **沒有 timeout**（純 `fetch`，無 AbortSignal）。
+  - **還原劇本（推論，非已驗證；有三項證據支持）**：11:39 班讀到 `[…11:38]` 後 put；11:41 班也讀到
+    `[…11:38]`（讀在 11:39 落地前）後 put，**蓋掉 11:39**；11:40 班最慢，讀到 `[…11:38, 11:41]`
+    後 append 11:40，造成非遞增。支持證據：① 漏格與逆轉落在同一個 3 分鐘窗；② 11:40／11:41 值全等
+    ＝兩班拿到**同一份 FinMind 快照**，與「班次重疊」互相印證；③ `appendSeries` 的冪等檢查只比對
+    **陣列最後一筆**（`arr[arr.length - 1].t === hm`），所以亂序不會被去重、而是 `push` 成重複點。
+  - **發生率（已驗證）**：13 個交易日 × 276 分 ≈ 3,588 次觸發中 1 次 ≈ **0.03%**。
+  - **為什麼 frame 覆蓋率仍 100%（已驗證）**：frame 走 `f:<date>:<hm>`、**一分鐘一把獨立 key**，
+    沒有共享可變狀態，天生免疫此 race——故上一條「13 檔全部 54/54」的掃描結果不受影響。
+  - **下游影響：實質為零（已驗證）**：`src/build_rrg_base.py` 與 `backtest/run_rrg*.py` 讀 `total`／`g`
+    **不讀 `series`**；`src/build_daysummary.py` 只取 `series` 的 idx 高低點，07-30 的高低點在
+    **09:42／09:02**、離缺口極遠，且補拉 `/replay` 的門檻是 `len(series) < 100`（275 不觸發）。
+    `data/daysummary/2026-07-30.json` 的 `series_n` 也是 **275**——兩次獨立讀 KV 結果一致，
+    證實**資料在 KV 裡就少了**，不是歸檔或 Actions 的問題。
+  - **殘留風險（現在式，既有理由涵蓋不到）**：漏格無害成立，但**亂序與重複點**會讓
+    `export function seriesTail` 的 `.slice(-n)`（n=60）**末筆不是最新的一分鐘**；且任何未來對
+    `series` 做「取最後一筆」或「相鄰差分」的消費者都會**靜默算錯**，不會拋錯。
+  - **狀態：已另立背景任務處理，尚未實作**。建議修法：把 `appendSeries`「只比對最後一筆」改成
+    「**以 `t` 為鍵對全陣列去重、put 前 sort by t**」，約 3 行、零額外 KV 成本；次要項是給
+    `finSnapshot` 加 fetch timeout。**不建議改 Durable Object**——成本遠高於收益。
 
 - **盤後分析摘要長文卡上線（2026-08-07）**：`pm-summary-1`，走**獨立 LINE Image message**
   （官方 2020-05 起像素無上限），不進 Flex carousel——2000 字塞進 1024×1024 有效字級只剩
@@ -81,26 +144,29 @@
     **12 張卡全入 manifest**（前一晚只有 9 張）；`pm-summary-1.png` 1040×4998、288,903 bytes、
     HTTP 200，`pm-summary-1-preview.png` 1040×1040、79,067 bytes、HTTP 200，
     `images` 與 `previews` 都有 `pm-summary-1`。順帶驗證了 `MAX_PNG_BYTES` 改逐卡跳過的修正
-    ——長文卡走 `MAX_LONGFORM_BYTES = 9_000_000`（`src/build_cards_png.py:50`、`:515`），
+    ——長文卡走 `MAX_LONGFORM_BYTES = 9_000_000`（`src/build_cards_png.py` 內宣告，
+    使用點 `limit = MAX_LONGFORM_BYTES if longform else MAX_PNG_BYTES`），
     289KB 遠低於門檻，**無整批連坐**。註：原記錄寫「1040×4812／292KB」，實際 4998px／289KB，
     屬**當日內容長度差異、非缺陷**（上方數字已更正）。
   - **② ❌ 推播掛圖未達成** → 已升格為獨立未解問題，見下一條「盤後圖卡推播時序」。
   - **③ ⏳「實機看 bubble 呈現」仍未驗**（官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
     **前置條件是先修好下一條的時序問題**——圖根本沒掛上推播，就沒有 bubble 可看。
-    另記一筆**觀測缺口**：`pushDailyCards` **完全沒有呼叫 `recordJob`**（`worker/src/index.js:1114`
-    的呼叫點前後皆無；`recordJob` 定義在 `:1130`，backup/summary/chain/aetf2/health 各路徑都有記，
+    另記一筆**觀測缺口**：`pushDailyCards` **完全沒有呼叫 `recordJob`**（`worker/src/index.js`
+    的 `out.cards = await pushDailyCards` 呼叫點前後皆無；`recordJob` 定義見
+    `export async function recordJob`，backup/summary/chain/aetf2/health 各路徑都有記，
     唯獨 cards 沒有），所以 `/jobs?date=` 與 `/health?slot=eve` 都查不到當晚推播結局——
     實查 08-07 與 08-06 的 `/jobs` 各 19 筆事件、**皆無 cards**。
     **LINE 是否送達只有使用者手機看得到，無法從外部確認**。建議補 `recordJob`。
 
 - **🔴 未解：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
   （2026-08-09 追 08-07 長文卡驗收時挖出的**系統性問題**，非單一事件）：
-  - **機制（已驗證，程式碼佐證）**：`.github/workflows/cards.yml:15` 的 cron 是 `'12 14 * * 1-5'`
-    ＝台北 22:12，但 **GitHub schedule 實際延遲 54 分~2 小時 25 分**；推播端 `pushDailyCards`
-    （`worker/src/index.js:2079`，門檻 `CARDS_PUSH_AFTER_MIN = 22*60+30`，`:1977`）台北 **22:30**
-    就動作，且**任一通道成功後立刻寫 KV 去重鍵**（`:2087` 讀、發送後寫），
+  - **機制（已驗證，程式碼佐證）**：`.github/workflows/cards.yml` 的 cron 是 `'12 14 * * 1-5'`
+    （grep 此字面量即得）＝台北 22:12，但 **GitHub schedule 實際延遲 54 分~2 小時 25 分**；
+    推播端 `pushDailyCards`（`worker/src/index.js` 的 `export async function pushDailyCards`，
+    門檻 `export const CARDS_PUSH_AFTER_MIN`＝`22 * 60 + 30`）台北 **22:30**
+    就動作，且**任一通道成功後立刻寫 KV 去重鍵**（該函式 ③ 的 `alertedKey(tp.date, "cards")` 讀、發送後寫），
     後續每 5 分的 evening 輪次一律 `already-pushed` 短路。
-    而 `attachCardImages`（`:2049`）與 `longformImage`（`:2069`）都要求
+    而 `export function attachCardImages` 與 `export function longformImage` 都要求
     `manifest.date === 台北今日`——22:30 當下 manifest 還是舊的一份 → 回 **0 張／null**。
   - **推論（非直接驗證）**：08-07 那則 LINE 推播是**全部純文字 bubble、沒有長文圖**。
     直接證據只在使用者手機上，外部查不到（見上一條的 `recordJob` 觀測缺口）。
@@ -132,7 +198,7 @@
   **連鎖**：frame 班週五不醒 → `storeFrame`（`worker/src/index.js:249`）/`appendSeries`（`:318-331`）沒被呼叫
   → `series:<週五>` 不存在 → `/health` 回 `noSeries:true` → 所有 TW 班被 non-trading-day 守門擋掉
   （`/backup?name=*` 與 `/evening` 實測全回 `skipped:"non-trading-day"`）；GH `intraday.yml` 週五
-  有跑但 KV 無 frame，`src/archive_intraday.py:115-116` 優雅退出不寫檔 → JSON 404。
+  有跑但 KV 無 frame，`src/archive_intraday.py` 的 `if n_hit == 0:` 分支優雅退出不寫檔 → JSON 404。
   **哨兵 `"*/5 9-14 * * 1-5"` 週五同樣不醒 → flows/postmkt 從未被 dispatch**——哨兵不看 series，
   這證明故障點在 **cron 層**而非 series 守門層（2026-07-25 當時的推測方向偏下游一層）。
   晚場協調班週五不醒 → summary-pm 無檔、diag→mktbal 鏈不啟動。daysummary/aetf 週五靠 GH 兜底落地。
@@ -142,7 +208,7 @@
   **已排除**：`taipeiParts()`（:608）UTC+8 換算正確；程式內 `tp.dow >= 1 && tp.dow <= 5`
   守門（:517、:627、:632）用 JS `getDay` 慣例（0=日），判台北週一~五**正確無誤**。
   真正的坑是**同一個字面量 `1-5`，JS 裡是週一~五、CF cron 裡是週日~週四**。
-  **修法（已改，未部署）**：13 條 dow `1-5` → `2-6`，並同步 `worker/src/index.js` 的 `FRAME_CRON`
+  **修法（當時狀態：已改，未部署；實際已於 2026-07-31 部署 version `f13ab220`，見本段開頭）**：13 條 dow `1-5` → `2-6`，並同步 `worker/src/index.js` 的 `FRAME_CRON`
   ＋`BACKUP_CRONS`／`DISPATCH_ROLES` 等 12 處字面量 key、`worker/test/*.mjs` 28 處，共 53 處。
   跨日界而寫 dow `*`＋程式守門的班（us／summary-am）**刻意不動**。本機測試 17 支全綠（0 失敗）。
   **下一步**：① `cd worker && npx wrangler deploy`（需 Cloudflare 認證）；
