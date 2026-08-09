@@ -39,18 +39,80 @@
     的持續性條件，再用 `backtest/run_rrg*.py` 複跑確認參數（詳見 `docs/rrg-spec-20260809.md` §6）；
     ② 若 12 次 `/replay` 造成延遲或 KV 額度壓力，升級路徑是新增 Worker `/chainseries` 端點
     一次回傳鏈層時間序列（回應體積約 960KB → 數 KB），屬**另一段獨立交付**（需 `wrangler deploy`）。
-  - **順帶發現、值得另案追**：`data/intraday/2026-07-18.json` 是**殘檔**（54 個時點只有 1 格有值）。
-    `build_rrg_base.py` 與 `run_rrg.py` 都用覆蓋率 ≥90% 守門把它剔除，但這代表 **intraday builder
-    那天可能出過事**（對照下方 2026-07-22 archive IndexError 段：07-18「成功」僅因命中 1/54 格倖存）。
+  - **✅ 已結案（2026-08-09 追查）：`data/intraday/2026-07-18.json` 殘檔不是故障，是週六手動首跑測試**。
+    原記為「順帶發現、值得另案追」，追下去結論如下。
+    - **檔案實況（已驗證）**：`times` 完整 54 格，`frames` 53 個 null，只有 index 39（請求時點 12:20）
+      有值——Worker 回退 ≤5 分給了 `12:19` 的 frame，故該格 `stale:1`；`series` 只有 **1 筆**
+      （正常交易日 276 筆）。覆蓋率 1/54＝1.9%。
+    - **成因（已驗證）**：**2026-07-18 是星期六、非交易日**。該檔是 7a 盤中歸檔管線上線當晚在週六手動
+      `workflow_dispatch` 的首跑測試（run `29641474219`，commit `44a96dc`），**不是排程班**——
+      `.github/workflows/intraday.yml` 的 cron 是 POSIX `'10 6 * * 1-5'`（`:10`），週六本來就不跑。
+    - **那唯一一格哪來的（推測，非已驗證）**：KV 裡的 `12:19` frame **推測**是當天人工測試 `/snap`
+      留下的殘留（同型前例見下方 07-25 手動打 `/snap?force=1` 寫入 `f:2026-07-25:22:51` 那條）。
+      KV frame TTL 僅 2 天，現已無法直接驗證，**此為推測**。
+    - **為何檔案照樣寫成功（已驗證）**：`src/archive_intraday.py:114` 的優雅退出只擋 `n_hit == 0`，
+      07-18 的 `n_hit == 1` 故沒觸發；而它「能成功」也正因為只命中 1 格——舊版補格邏輯對**同一次產業
+      的第二個命中時點**必炸 `IndexError`，所以 07-20、07-21 兩支排程 run 都在 archive 步驟 failure
+      （該 bug 已由 commit `d85e49f`（07-22）修掉，見下方「intraday 歸檔修復＋搶救」段）。
+    - **還會不會再發生**：① IndexError → 已修（`d85e49f`）；② 週末誤觸發 → 已被 07-31 CF cron dow
+      事故定案涵蓋（deploy version `f13ab220`，08-02 週日驗收通過），**自動排程路徑不會再產生這種檔**；
+      ③ **但守門仍是漏的（現在式）**——`src/archive_intraday.py` 至今只擋 `n_hit == 0`、**沒有最低
+      覆蓋率門檻**。殘檔仍可能出自兩條路：(a) 非交易日手動 dispatch 且 KV 恰有殘留 frame；
+      (b) 交易日中途 frame 班或 KV 出事、只落到零星幾格。下游是安全的（`src/build_rrg_base.py:73`
+      與 `backtest/run_rrg.py:70` 的 `MIN_COVER = 0.9` 會把它剔除），所以這是**資料衛生問題、非功能故障**。
+    - **待辦（尚未實作）**：把 `archive_intraday.py:114` 的 `n_hit == 0` 改成
+      `n_hit < len(times) * 0.9`，或至少對低覆蓋率印 warning。
+    - **全目錄掃描（已驗證，14 檔）**：除 07-18（1/54＝1.9%）外，其餘 **13 檔全部 54/54＝100%**，
+      **沒有第二個殘檔**。缺席的交易日只有 07-24、07-31（CF cron dow bug，frame 樣本永久遺失，已結案）；
+      07-26 週日死資料已由 commit `220adca` 刪除。**實際可用回測樣本＝13 個交易日**。
+    - 註：下方「7a 盤中歸檔＋權重月更」段其實早已記過「2026-07-18.json 是週六 stale 資料」，
+      只是本段的「順帶發現」條目當時沒連到它。
 
 - **盤後分析摘要長文卡上線（2026-08-07）**：`pm-summary-1`，走**獨立 LINE Image message**
   （官方 2020-05 起像素無上限），不進 Flex carousel——2000 字塞進 1024×1024 有效字級只剩
   7.5px。Worker `fxCardSummaryLongform` 讀 postmkt `data/summary/<date>-pm.json`，
-  Python `render_longform` 渲染 1040×4812／292KB ＋ 1040×1040 預覽。
+  Python `render_longform` 渲染 1040×4998／289KB ＋ 1040×1040 預覽。
   **同時修掉一顆地雷**：`build_cards_png.py` 的 `MAX_PNG_BYTES` 原本用 `raise SystemExit`，
   單卡超標會炸掉整個 render step → commit 不執行 → manifest 停在昨日 → 當晚**全部**卡退純文字；
-  改成逐卡跳過。**待線上驗收**：08-07（五）22:12 渲染、22:30 推播，實機看 bubble 呈現
-  （官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
+  改成逐卡跳過。
+  - **① ✅ 渲染已驗收通過（2026-08-09 查核，全部已驗證）**：cards workflow run `31190911762`
+    event=schedule、conclusion=success；commit `265013e`「cards png 2026-08-07T15:06:05Z」
+    ＝台北 23:06；線上 manifest `generated_at 2026-08-07T23:06:05+08:00`、`date: 2026-08-07`、
+    **12 張卡全入 manifest**（前一晚只有 9 張）；`pm-summary-1.png` 1040×4998、288,903 bytes、
+    HTTP 200，`pm-summary-1-preview.png` 1040×1040、79,067 bytes、HTTP 200，
+    `images` 與 `previews` 都有 `pm-summary-1`。順帶驗證了 `MAX_PNG_BYTES` 改逐卡跳過的修正
+    ——長文卡走 `MAX_LONGFORM_BYTES = 9_000_000`（`src/build_cards_png.py:50`、`:515`），
+    289KB 遠低於門檻，**無整批連坐**。註：原記錄寫「1040×4812／292KB」，實際 4998px／289KB，
+    屬**當日內容長度差異、非缺陷**（上方數字已更正）。
+  - **② ❌ 推播掛圖未達成** → 已升格為獨立未解問題，見下一條「盤後圖卡推播時序」。
+  - **③ ⏳「實機看 bubble 呈現」仍未驗**（官方對超長直圖在聊天室怎麼裁無明文，只能實測）。
+    **前置條件是先修好下一條的時序問題**——圖根本沒掛上推播，就沒有 bubble 可看。
+    另記一筆**觀測缺口**：`pushDailyCards` **完全沒有呼叫 `recordJob`**（`worker/src/index.js:1114`
+    的呼叫點前後皆無；`recordJob` 定義在 `:1130`，backup/summary/chain/aetf2/health 各路徑都有記，
+    唯獨 cards 沒有），所以 `/jobs?date=` 與 `/health?slot=eve` 都查不到當晚推播結局——
+    實查 08-07 與 08-06 的 `/jobs` 各 19 筆事件、**皆無 cards**。
+    **LINE 是否送達只有使用者手機看得到，無法從外部確認**。建議補 `recordJob`。
+
+- **🔴 未解：盤後圖卡推播時序錯位——PNG hero 與長文圖據外部證據從未真正掛上過任何一次 LINE 推播**
+  （2026-08-09 追 08-07 長文卡驗收時挖出的**系統性問題**，非單一事件）：
+  - **機制（已驗證，程式碼佐證）**：`.github/workflows/cards.yml:15` 的 cron 是 `'12 14 * * 1-5'`
+    ＝台北 22:12，但 **GitHub schedule 實際延遲 54 分~2 小時 25 分**；推播端 `pushDailyCards`
+    （`worker/src/index.js:2079`，門檻 `CARDS_PUSH_AFTER_MIN = 22*60+30`，`:1977`）台北 **22:30**
+    就動作，且**任一通道成功後立刻寫 KV 去重鍵**（`:2087` 讀、發送後寫），
+    後續每 5 分的 evening 輪次一律 `already-pushed` 短路。
+    而 `attachCardImages`（`:2049`）與 `longformImage`（`:2069`）都要求
+    `manifest.date === 台北今日`——22:30 當下 manifest 還是舊的一份 → 回 **0 張／null**。
+  - **推論（非直接驗證）**：08-07 那則 LINE 推播是**全部純文字 bubble、沒有長文圖**。
+    直接證據只在使用者手機上，外部查不到（見上一條的 `recordJob` 觀測缺口）。
+  - **不是單一事件（已驗證）**：查 manifest 歷史，**07-31、08-03、08-04、08-05 的渲染都跨過午夜
+    才完成**，`manifest.date` 永遠對不上推播當下的台北日期；**08-07 是第一次落在同一天**，
+    但 23:06 仍晚於 22:30。**據外部證據，PNG hero 與長文圖從未真正掛上過任何一次 LINE 推播**。
+  - **文件裡的錯誤假設**：`cards.yml` 註解寫的「22:12 渲染 → 22:30 推播剛好（~46 分餘裕）」
+    在 GH cron 實際延遲下**不成立**；而本段下方「Worker 升格全系統主排程」的「待改進①」其實早記過
+    「GH cron 兜底 schedule run 仍延遲約 1.5-2.5h」，**只是沒人把它連到 cards 班**。
+  - **修法候選（均未實作）**：① 比照其他班改由 **Worker 在台北 21:50 主動 `workflow_dispatch
+    cards.yml`**，GH cron 留兜底；② `pushDailyCards` 加「manifest 非當日就**先不推、不寫 KV**，
+    等到窗尾 23:5x 才退純文字」的等待邏輯。
 
 - **✅ 已結案：CF cron dow 慣例錯誤，13 條 cron 星期五全不觸發、星期日誤觸發**
   （2026-07-31 定案並部署 version `f13ab220`；**08-02 週日與 08-07 週五兩次驗收皆通過**——

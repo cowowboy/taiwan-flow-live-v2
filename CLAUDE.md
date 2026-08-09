@@ -33,7 +33,7 @@
 <!-- CANON:END v1 -->
 
 台股盤中即時資金流向監控站，同時是「股市雷達」四站家族的**資料中樞**
-（`PROJECT_SUMMARY.md:477-478`）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
+（見 `PROJECT_SUMMARY.md`「一句話說明」段）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
 前端是單檔 `index.html`（129KB），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
 資金湧入／資金退出＋摘要分析（`index.html:145-151`）。
 **`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
@@ -68,7 +68,8 @@
 - **冪等**：KV 鍵 `sentinel:<YYYYMMDD>:<signal>`（`sentinelKey` :602），值 `"dispatched"`，
   TTL 172800（2 天）（:668）；四訊號全寫入則當晚短路，只讀 KV 不打 FinMind（:656-658）。
 - **dispatch 失敗不寫 KV**（:670-673）→ 下一輪（5 分後）自動重試。
-- **不變式：下游 GitHub cron 全數保留為兜底，一條不刪**（`PROJECT_SUMMARY.md:148`）——
+- **不變式：下游 GitHub cron 全數保留為兜底，一條不刪**
+  （見 `PROJECT_SUMMARY.md`「快速接手」的「Worker 升格全系統主排程」段）——
   `taiwan-flows/daily.yml` 台北 21:19、`postmkt/build.yml` 21:53，兩管線冪等，重跑無害。
 
 ## 其他 scheduled 角色（分流入口 `dispatchRoleForCron` :779 → `scheduledRole` :589）
@@ -82,7 +83,8 @@
 ## 資料是姊妹站上游（跨站變更）
 
 `taiwan-stock-news` 讀 `data/morning.json`；`postmkt` 讀 `data/aetf/latest.json`（含
-`stocks[code][3]` 市值欄）。**改輸出格式屬跨站變更**（`PROJECT_SUMMARY.md:577-578`）。
+`stocks[code][3]` 市值欄）。**改輸出格式屬跨站變更**
+（見 `PROJECT_SUMMARY.md`「五、目前待辦與已知限制」）。
 
 ## 驗證方式
 
@@ -101,8 +103,13 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ## 已知限制／坑
 
 1. KV **list** 免費版僅 1000 次/日、曾爆額度；改用時間索引 key 讓 `pickFrames` 只用
-   get（`PROJECT_SUMMARY.md:549`）。
-2. 告警由 Worker 自己發，**Worker 整個掛掉時發不出**（`PROJECT_SUMMARY.md:137-138`）。
+   get（見 `PROJECT_SUMMARY.md`「三、關鍵技術決策與踩過的雷」表「KV 額度」列）。
+2. 告警由 Worker 自己發，**Worker 整個掛掉時發不出**
+   （見 `PROJECT_SUMMARY.md`「快速接手」的「排程可靠度補強」段）。
 3. 2026-07-24 盤中 frame 班整天沒落格：`series:<date>` 是 TW 班的交易日守門，
-   缺它會讓**所有 TW 主觸發被靜默跳過**（`PROJECT_SUMMARY.md:94-109`，未結案）。
-4. 版控曾發生 force-push 誤刪 98 commit 事故並救回（`PROJECT_SUMMARY.md:553`）。
+   缺它會讓**所有 TW 主觸發被靜默跳過**（見 `PROJECT_SUMMARY.md`「快速接手」的
+   「2026-07-24（週五）盤中 frame 班整天沒落格」段）。根因是 CF cron dow 為 Quartz 慣例
+   （`1-5`＝週日~週四）導致週五整天不觸發，**已於 2026-07-31 定案部署（version `f13ab220`）、
+   08-02 與 08-07 兩次驗收通過**（見同段上方的「✅ 已結案：CF cron dow 慣例錯誤」段）。
+4. 版控曾發生 force-push 誤刪 98 commit 事故並救回
+   （見 `PROJECT_SUMMARY.md`「三、關鍵技術決策與踩過的雷」表「版控」列）。
