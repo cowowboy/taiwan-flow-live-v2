@@ -1,8 +1,47 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-31（**週五全線靜默事故定案**：CF cron dow 用 Quartz 慣例，13 條 `1-5` 實為週日~週四）
+最後更新：2026-08-09（**盤中產業輪動雷達（RRG）上線**：即時一覽第三顆視角 pill，待下個交易日盤中實查）
 
 ## 快速接手
+
+- **盤中產業輪動雷達（RRG）上線（2026-08-09，commit `da144ca`，已 push＋部署成功）**：
+  「即時一覽（ov）」資金地圖的**第三顆視角 pill**（`地圖｜象限｜輪動雷達`，`index.html:1606-1613`，
+  狀態 `state.sub.ov.mapView="rrg"`）。x=RS-Ratio 相對強弱、y=RS-Mom 強弱動能，每點＝一條產業鏈、
+  尾巴＝近數十分鐘軌跡。**前端函式群一律 `ovRrg*` 前綴——勿與既有 `ovRadar*`（盤中異動雷達）混淆**，
+  兩者是不同功能。
+  - **基準表**：`src/build_rrg_base.py` → `data/rrg_base.json`（47 條產業鏈 × 54 個時點，
+    取**前 5 個交易日同一時點**的平均 share 當分母）。**排程**：`.github/workflows/intraday.yml`
+    在 archive 步驟之後跑 builder，commit 後 dispatch `pages.yml`。
+  - **座標參數（勿憑印象改，改前先看 spec）**：K=5 同時點基準、L=30 分動能、step=10 分、
+    位移異常判定 z≥2.0 **且** Δshare≥0.02pp、進入 RRG 視角時打 `/replay` 12 次。
+  - **回測依據**（依鐵律「新指標先問有沒有回測依據」）：`backtest/run_rrg.py`／`report_rrg.md`／
+    `test_rrg_smoke.py`，另有三支設計分析 `run_rrg_topn.py`／`run_rrg_crowding.py`／`run_rrg_alpha.py`。
+  - **規格與驗收條件全文**：`docs/rrg-spec-20260809.md`。
+  - **待下個交易日盤中實查（交付日 08-09 為週六、無盤中資料，以下 7 項全未驗）**：
+    ① 瀏覽器 Network 面板確認進入 RRG 視角時 `/replay` 請求數＝12、20 秒自動刷新後新增 ≤1；
+    ② 桌機／手機各一張截圖確認無橫向溢出；③ **真實盤中資料下的畫面擁擠度**（改善象限實際條數、
+    標籤碰撞、軌跡可讀性）——目前只用合成資料壓測過；④ 降級時刻真機確認：台北 10:01 前應顯示
+    「盤中資料累積中」、位移異常 10:41 後才可能出現；⑤ 週末／盤外 `/replay` 回 200＋`{error}` 時
+    文案應為「取不到盤中快照」而非誤報服務中斷；⑥ 三顆 pill 來回切換的**縮放不污染**
+    （碼上已重置 `OV_QUAD_TF`，需真機 pinch/wheel 實測）；⑦ `market.tse.amt_yi` vs
+    `ovReplayBuild().mkt.tseYi` 的口徑差（後者只加總**已分類的 twse 個股**），註解宣稱等同、
+    離線實測比值 1.0000，建議盤中再抓一筆確認。
+  - **待下次排程實跑確認**：`intraday.yml` 首跑——`actions: write` 是否足以
+    `gh workflow run pages.yml`；以及 builder 失敗時 commit 確實照跑、而整個 run 轉紅燈
+    （可用 workflow_dispatch 提前驗）。
+  - **已知限制（設計取捨，非缺陷）**：① frame 連續 3 次 fetch 失敗後，該時點當日**永久標 false**，
+    只能整頁重新整理救回；② frame 重試依賴 20 秒自動刷新觸發，分頁被瀏覽器節流時會延後；
+    ③ 回放模式下 RRG **固定顯示即時軌跡、不跟隨回放時點**（畫面已明確標示；跟隨回放列為後續增強）；
+    ④ `ovRrgZ` 在 MAD ≤1e-9 時回 0，故 10:41 剛及格的 4 筆視窗若前 3 筆近乎相同，突發位移不會被標
+    （**與回測 `run_rrg.py` 行為一致**，刻意對齊）。
+  - **後續增強方向**：① **盤後日頻版 RRG 尚未做**——阻礙是候補清單跨日穩定度不足（相鄰日交集
+    40~45%、改善象限 Top5 為 0%），需先把歷史回補到 **40 個交易日以上**、並加「連續 2 日符合才進榜」
+    的持續性條件，再用 `backtest/run_rrg*.py` 複跑確認參數（詳見 `docs/rrg-spec-20260809.md` §6）；
+    ② 若 12 次 `/replay` 造成延遲或 KV 額度壓力，升級路徑是新增 Worker `/chainseries` 端點
+    一次回傳鏈層時間序列（回應體積約 960KB → 數 KB），屬**另一段獨立交付**（需 `wrangler deploy`）。
+  - **順帶發現、值得另案追**：`data/intraday/2026-07-18.json` 是**殘檔**（54 個時點只有 1 格有值）。
+    `build_rrg_base.py` 與 `run_rrg.py` 都用覆蓋率 ≥90% 守門把它剔除，但這代表 **intraday builder
+    那天可能出過事**（對照下方 2026-07-22 archive IndexError 段：07-18「成功」僅因命中 1/54 格倖存）。
 
 - **盤後分析摘要長文卡上線（2026-08-07）**：`pm-summary-1`，走**獨立 LINE Image message**
   （官方 2020-05 起像素無上限），不進 Flex carousel——2000 字塞進 1024×1024 有效字級只剩
