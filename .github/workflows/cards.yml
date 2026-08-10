@@ -10,10 +10,23 @@ name: cards
 # 對 22:12 有 ~46 分餘裕）。注意 postmkt summary.yml 的 cron 兜底是台北 22:47，晚於本班
 # 與推播——哨兵觸發失敗的日子長文卡會靜默缺席（降級正確，但查因要往那邊看）。
 # 冪等：整目錄每晚重建（腳本先清 *.png 再寫），重跑無害。
+#
+# AM slot（2026-08-10 晨間管線）：Worker runMorning 台北 08:05–08:15 dispatch 本檔
+# （inputs.slot=am）→ /cards/data?slot=am → data/cards/am/（與晚間 latest/ 分目錄）。
+# 晨報 daily-brief-card.json 台北 07:30 前後產出、morning.json 07:1x，08:0x 渲染有充分餘裕；
+# AM cron 兜底＝UTC 00:40（台北 08:40，pushMorningCards 窗尾 08:50 前最後機會）。
+# cron 觸發無 inputs，slot 由 UTC 小時判斷（0 時=am、14 時=pm，見 decide slot step）。
 on:
   schedule:
-    - cron: '12 14 * * 1-5'   # 台北 22:12（UTC+8）
+    - cron: '12 14 * * 1-5'   # 台北 22:12（UTC+8）晚間兜底
+    - cron: '40 0 * * 1-5'    # 台北 08:40（UTC+8）晨間兜底
   workflow_dispatch:
+    inputs:
+      slot:
+        description: '渲染場次（pm=盤後、am=晨間）'
+        type: choice
+        options: [pm, am]
+        default: pm
 
 permissions:
   contents: write
@@ -51,13 +64,33 @@ jobs:
             [ "$(head -c 4 "$f")" = "OTTO" ] || { echo "::error::$f 非 OTF"; exit 1; }
             [ "$(wc -c < "$f")" -gt 1000000 ] || { echo "::error::$f 檔案過小"; exit 1; }
           done
+      # slot 判定：dispatch 帶 inputs.slot；cron 觸發依 UTC 小時（0 時排程=am、14 時排程=pm）。
+      # 不比對 github.event.schedule cron 字串（改 cron 容易漏改比對式）；GH schedule 實測
+      # 延遲 54 分~2 小時 25 分（見檔頭註解），故 am 判定放寬到 UTC 00–05 時（台北 08–13 時），
+      # pm 班（UTC 14:12 起跑）即使延遲 2.5 小時也在 16 時台，不會誤入。
+      - name: decide slot
+        id: slot
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            slot="${{ inputs.slot || 'pm' }}"
+          else
+            hour=$(date -u +%H)
+            case "$hour" in
+              00|01|02|03|04|05) slot="am" ;;
+              *) slot="pm" ;;
+            esac
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+          echo "slot=$slot"
       - name: render cards png
-        run: python src/build_cards_png.py
+        run: python src/build_cards_png.py --slot "${{ steps.slot.outputs.slot }}"
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/cards/latest/
+          dir="data/cards/latest"
+          [ "${{ steps.slot.outputs.slot }}" = "am" ] && dir="data/cards/am"
+          git add "$dir/"
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -m "cards png $(date -u +%FT%TZ)"
           pushed=0

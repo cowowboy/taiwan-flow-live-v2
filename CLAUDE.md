@@ -43,7 +43,7 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 17 支 `.mjs`）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 18 支 `.mjs`）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`（12 支＝9 支排程
   builder（多為 Worker 主觸發的兜底備援）＋`canon.yml` 守 CLAUDE.md 頂端的 CANON 區塊
   ＋`pages.yml` 部署＋`backtest.yml`，後三支無 cron）
@@ -89,6 +89,31 @@
 - `morning`：平日 06:47 → 本 repo `morning.yml`
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
 - `health` 健檢班：台北 23:50、09:30，只盤點產物落地與否、不 dispatch
+- `summary-am` 窗（06:50–08:50）另掛晨場協調班 `export async function runMorning`（見下節）
+
+## 晨間 LINE 圖卡（AM slot，2026-08-10）
+
+晚間圖卡管線（cards.yml → `src/build_cards_png.py` → pushDailyCards）的晨間平行場，
+**晚間路徑零改動**（FX_ACTIVE_CARDS／pushDailyCards 的 gate/時窗/dedup 全不動）：
+
+- **卡片**（白名單 `export const FX_AM_CARDS`，共 4 張）：晨報長文卡 `am-brief-1`
+  （`export function fxCardMorningBrief`，資料源＝taiwan-stock-news 的
+  `daily-brief-card.json`，台北 07:30 前後產出；**刻意不進 FX_CARD_BUILDERS**，
+  避免污染晚間 skipped 觀測）＋昨日市場三卡 `news-morning-2/3/4`
+  （休眠 builder 重新啟用，源＝morning.json／daysummary／us）。
+- **時窗**（掛在 summary-am 三條 cron 的同一處喚醒）：台北 08:05–08:15 dispatch
+  `cards.yml`（inputs.slot=am，冪等 KV `bkfired:<date>:cardsrender-am`；此窗實際只有
+  08:10 一輪，失敗由 GH 兜底 cron UTC 00:40 接手）→ 08:20–08:50
+  `export async function pushMorningCards`（dedup `alerted:<date>:cards-am`、
+  manifest.date=台北今日且 ≥1 圖才推；晨間**無**純文字退路）。
+- **輸出目錄**：`data/cards/am/`（`build_cards_png.py --slot am`；與晚間 `latest/`
+  分目錄，開場清 *.png 互不誤刪）。渲染取卡走 `/cards/data?slot=am`
+  （cf cache key 已把 slot 併進 path，am/pm 不互染）。
+- **新鮮度守門**在 `export async function buildCardsData`（slot=am）：晨報卡＝
+  brief.date 為台北今日；morning 三卡＝morning.json 的 generated_at 台北日為今日
+  （**不是**晚間的 baseline gate——早上 baseline 必為昨日）。全不新鮮 → 空卡＋date=null
+  → Python 拒渲染。
+- 測試：`node test/morningcards.mjs`。
 
 ## 資料是姊妹站上游（跨站變更）
 
@@ -102,7 +127,7 @@
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 部署
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 16 支要個別跑（離線、免 token）
+node test/sentinel.mjs              # 其餘 17 支要個別跑（離線、免 token）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 

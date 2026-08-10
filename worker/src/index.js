@@ -1244,6 +1244,120 @@ export async function runEvening(env, tp, fetchFn = fetch, opts = {}) {
   return out;
 }
 
+// ---- 晨場協調班（2026-08-10 AM slot）：晨間 LINE 圖卡渲染 dispatch ＋推播 ----
+// 掛載點＝summary-am 三條 cron 的同一處喚醒（06:50/06:55、07:00–07:55 每 5 分、
+// 08:00–08:50 每 10 分），與既有 runSummaryDispatch(env,tp,"am") 並存、互不影響。
+// 時窗：08:05–08:15 dispatch cards.yml（inputs.slot=am；此窗內實際只有 08:10 一輪喚醒
+// （尾窗 cron 為 */10），dispatch 失敗由 GH 兜底 cron UTC 00:40 接手）；08:20–08:50
+// pushMorningCards（每 10 分一輪＝08:20/08:30/08:40/08:50 共 4 次機會）。
+// 週末：summary-am cron dow 為 *，比照 runSummaryDispatch 用台北 dow 守一次。
+// 晚間路徑（runEvening／pushDailyCards／FX_ACTIVE_CARDS）零改動。
+export const CARDS_AM_RENDER_AFTER_MIN = 8 * 60 + 5;    // 台北 08:05（晨報 07:30 產出後有餘裕）
+export const CARDS_AM_RENDER_UNTIL_MIN = 8 * 60 + 15;   // 台北 08:15（窗上緣，exclusive）
+export const CARDS_AM_PUSH_AFTER_MIN = 8 * 60 + 20;     // 台北 08:20（渲染實測約 5 分）
+export const CARDS_AM_PUSH_UNTIL_MIN = 8 * 60 + 50;     // 台北 08:50（summary-am 尾窗最後一輪，inclusive）
+export async function runCardsRenderAm(env, tp, fetchFn = fetch, opts = {}) {
+  const nowMin = tp.hour * 60 + tp.minute;
+  if (nowMin < CARDS_AM_RENDER_AFTER_MIN || nowMin >= CARDS_AM_RENDER_UNTIL_MIN)
+    return { name: "cards-render-am", waiting: "outside-08:05-08:15" };
+  const key = bkfiredKey(tp.date, "cardsrender-am");
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "cards-render-am", skipped: "already-fired" };
+  if (opts.dry) return { name: "cards-render-am", wouldDispatch: true };
+  try {
+    await ghDispatchWithRetry(env, "taiwan-flow-live-v2", "cards.yml", fetchFn, opts.sleepFn || sleep, { slot: "am" });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", 1), { expirationTtl: BKFIRED_TTL });
+    console.log("cards-render-am: 晨間圖卡渲染 dispatched");
+    await recordJob(env, tp, "cards-render-am", "fired");
+    return { name: "cards-render-am", fired: true };
+  } catch (e) {
+    console.log("cards-render-am dispatch:", e && e.message);
+    await recordJob(env, tp, "cards-render-am", "error", String((e && e.message) || e));
+    await alertJob(env, tp, "cards-render-am-err",
+      `❌ 晨間圖卡渲染 dispatch 失敗：${String((e && e.message) || e)}（GH 08:40 兜底 cron 仍會跑）`, fetchFn);
+    return { name: "cards-render-am", error: String((e && e.message) || e) };
+  }
+}
+// 晨間推播：manifest（data/cards/am/）當日且至少 1 張圖才推——不同於晚間，晨間**沒有**
+// 純文字退路（morning2/3/4 資料晚間已推過一輪文字版的等價內容，晨間價值在圖卡本身；
+// manifest 整窗等不到就當日不推，KV 不寫、不告警轟炸——渲染失敗已有 cards-render-am 告警）。
+// 訊息組成：morning2/3/4 → Flex carousel（≤12 bubbles、<50KB、hero 圖 1024 上限由渲染端保證）
+// ＋晨報長文卡 → 單獨 Image message（同 pm-summary-1 慣例）。
+export async function pushMorningCards(env, tp, fetchFn = fetch, opts = {}) {
+  const nowMin = tp.hour * 60 + tp.minute;
+  if (nowMin < CARDS_AM_PUSH_AFTER_MIN) return { name: "cards-am", waiting: "before-08:20" };
+  if (nowMin > CARDS_AM_PUSH_UNTIL_MIN) return { name: "cards-am", skipped: "after-08:50" };
+  if (!env.LINE_TOKEN || !env.LINE_USER_ID) return { name: "cards-am", skipped: "no-channel" };
+  const key = alertedKey(tp.date, "cards-am");
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "cards-am", skipped: "already-pushed" };
+  // manifest：raw 直抓、帶 ?d= 破快取（GitHub raw CDN ~5 分快取；推播窗僅 30 分，吃舊檔會整窗撲空）
+  let manifest = null;
+  try {
+    const r = await fetchFn(`${env.DATA_BASE}/cards/am/manifest.json?d=${opts.nowMs || Date.now()}`);
+    if (r.ok) manifest = await r.json();
+  } catch (e) { console.log("cards-am manifest:", e && e.message); }
+  const manifestDate = String((manifest || {}).date || "").slice(0, 10);
+  const nImgs = manifest && manifest.images && typeof manifest.images === "object"
+    ? Object.keys(manifest.images).length : 0;
+  // gate：manifest.date===台北今日且至少 1 張圖；未達標＝純等待（零副作用，下輪 10 分後再看）
+  if (manifestDate !== tp.date || nImgs < 1) {
+    return { name: "cards-am", waiting: "manifest-not-ready",
+      manifestDate: manifestDate || null, imgs: nImgs };
+  }
+  // 卡片資料：與 /cards/data?slot=am 同一套組裝＋新鮮度守門（date/白名單/assertCardAllowed）
+  const data = await buildCardsData(env, tp, fetchFn, { ...opts, slot: "am" });
+  const cards = data.cards.filter((c) => c.id !== FX_AM_LONGFORM_CARD);
+  const hasBrief = data.cards.some((c) => c.id === FX_AM_LONGFORM_CARD);
+  const lf = hasBrief ? longformImage(manifest, tp.date, FX_AM_LONGFORM_CARD) : null;
+  const imgs = attachCardImages(cards, manifest, tp.date);
+  if (!cards.length && !lf) {
+    // 卡全數不新鮮（或晨報圖缺且無其他卡）→ 記 skip 短路當日（同晚間 skip-empty 慣例）
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, "skip-empty", { expirationTtl: ALERTED_TTL });
+    await recordJob(env, tp, "cards-am", "skip-empty", `manifest=${manifestDate} imgs=${nImgs}`);
+    return { name: "cards-am", skipped: "no-cards" };
+  }
+  if (opts.dry) return { name: "cards-am", wouldPush: cards.length, imgs,
+    longform: lf ? "attached" : (hasBrief ? "no-image" : "no-card") };
+  const messages = [];
+  if (cards.length) {
+    const ms = buildCardCarousels(cards, "股市雷達 晨間圖卡");
+    ms.forEach((m, i) => {
+      m.altText = `股市雷達 晨間圖卡 ${i + 1}/${ms.length}｜${tp.date}`.slice(0, 1500);
+    });
+    messages.push(...ms);
+  }
+  if (lf && messages.length < 5) {
+    messages.push({ type: "image", originalContentUrl: lf.url, previewImageUrl: lf.preview });
+  }
+  const { url, init } = lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, messages);
+  const resp = await fetchFn(url, init);
+  if (!resp.ok) {
+    // 失敗不寫 KV → 下輪（10 分後）自動重試；接線層（runMorning）負責告警
+    await recordJob(env, tp, "cards-am", "error", `LINE HTTP ${resp.status}`);
+    throw new Error(`晨間圖卡 LINE push 失敗：HTTP ${resp.status}`);
+  }
+  if (env.FLOW_KV) await env.FLOW_KV.put(key, "pushed", { expirationTtl: ALERTED_TTL });
+  await recordJob(env, tp, "cards-am", "pushed",
+    `cards=${cards.length} imgs=${imgs} lf=${lf ? "attached" : (hasBrief ? "no-image" : "no-card")}`);
+  return { name: "cards-am", sent: true, cards: cards.length, imgs, longform: !!lf };
+}
+// 晨場協調班本體：週末守門 → 渲染 dispatch（有 token 才做）→ 推播。兩步各自 try/catch，
+// 任何失敗都不影響同一次喚醒裡並行的 runSummaryDispatch(am)。
+export async function runMorning(env, tp, fetchFn = fetch, opts = {}) {
+  if (tp.dow != null && (tp.dow < 1 || tp.dow > 5)) return { skipped: "non-trading-day" };
+  const out = {};
+  if (env.GH_DISPATCH_TOKEN) {
+    try { out.render = await runCardsRenderAm(env, tp, fetchFn, opts); }
+    catch (e) { out.render = { error: String((e && e.message) || e) }; }
+  } else out.render = { skipped: "no-token" };
+  try { out.push = await pushMorningCards(env, tp, fetchFn, opts); }
+  catch (e) {
+    out.push = { error: String((e && e.message) || e) };
+    await alertJob(env, tp, "cards-am-err",
+      `❌ 晨間圖卡：${out.push.error}（KV 未記，下輪自動重試）`, fetchFn);
+  }
+  return out;
+}
+
 // ---- 排程狀態軌跡 jobstat（2026-07-25 P1）----
 // 動機：排程決策原本只進 console.log，Worker 日誌不持久＝事後查不到「今天這班到底發生什麼」。
 // 只記**狀態轉換**（fired／fresh／produced／error），不記輪詢噪音（skip/waiting）——晚場班
@@ -2035,6 +2149,9 @@ export const FX_CARD_BUILDERS = [
   ["pm-lending-6", (s) => fxCardLending(s, "margin_bal", "融資餘額排行", "融資餘額")],
   ["pm-summary-1", fxCardSummaryLongform],
 ];
+// 晨報長文卡 am-brief-1 **刻意不進上表**：表是晚間 buildDailyCards 的來源，掛進去會讓
+// 每個 pm 之夜多一筆「dailyBrief 缺」的 skipped（污染 pushDailyCards 的 skippedCards
+// 觀測值，也違反「晚間路徑零改動」）。AM 場由 buildCardsData(slot=am) 另行組裝。
 // 2026-07-30 內容裁剪（使用者授權以投資人角度評選）：39→11 張，判準＝
 // 「不開網站也想送到眼前、會影響明天的決定、更新頻率配得上每日推播」。
 // builder 全保留——砍掉的卡加回這個清單即復活。詳見 spec 3C 節。
@@ -2071,6 +2188,67 @@ export function fxCardSummaryLongform(s) {
     note: "與本站其他圖卡不同：其餘卡片僅描述歷史統計傾向，本卡含推測性內容。"
         + "僅供參考，非投資建議，據以操作風險自負。",
     disclaimer: "本卡由 AI 依當日資料彙整，內含方向判斷與假設性進出情境，未經回測驗證",
+  };
+}
+
+// ---- 晨間 AM slot（2026-08-10）：每日晨報長文卡＋昨日市場三卡 ----
+// 晨報卡資料源＝taiwan-stock-news 的 daily-brief-card.json（台北 07:30 前後產出）；
+// 昨日市場三卡＝重新啟用休眠 builder fxCardMorning2/3/4（morning.json／daysummary／us）。
+// FX_AM_CARDS＝晨間白名單（與晚間 FX_ACTIVE_CARDS 平行、互不相干——晚間白名單不動）。
+export const FX_AM_LONGFORM_CARD = "am-brief-1";
+export const FX_AM_CARDS = new Set([
+  FX_AM_LONGFORM_CARD,                                       // 每日晨報（longform 長圖）
+  "news-morning-2", "news-morning-3", "news-morning-4",      // 籌碼備忘／昨日資金流向／美股速覽
+]);
+// 長文卡 id 依 slot：pm 沿用 FX_LONGFORM_CARD（既有行為不變）、am＝晨報卡
+export const fxLongformCard = (slot) => (slot === "am" ? FX_AM_LONGFORM_CARD : FX_LONGFORM_CARD);
+export const DAILY_BRIEF_URL =
+  "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
+// 晨報長文卡：daily-brief-card.json → longform 卡。段落順序（使用者定案）：
+// 今日三件事 → 開盤前定位 → 本週關鍵事件 → 今日一句話；life 欄可缺可空（容錯，不入卡）。
+// 不放具體買賣點位／操作建議（網頁版晨報才有）；全文過 fxNeutralize 後仍受
+// assertCardAllowed 禁用字最後防線（與 pm-summary-1 同一套誠實原則守門）。
+// 新鮮度（date===台北今日）不在此判——builder 是無時鐘純函式，守門在 buildCardsData(am)。
+export function fxCardMorningBrief(s) {
+  const j = fxNeed(s.dailyBrief, "dailyBrief");
+  const date = String(j.date || "").slice(0, 10);
+  if (!date) return { skip: "daily-brief 無日期" };
+  const paras = [];
+  const top3 = (Array.isArray(j.top3) ? j.top3 : []).filter((o) => o && o.title);
+  if (top3.length) {
+    paras.push("## 今日三件事");
+    top3.forEach((o, i) => {
+      paras.push(`${i + 1}. ${o.title}`);
+      if (o.why) paras.push(`→ ${o.why}`);
+    });
+  }
+  const pos = (Array.isArray(j.positioning) ? j.positioning : []).filter((o) => o && (o.fact || o.view));
+  if (pos.length) {
+    paras.push("## 開盤前定位");
+    for (const o of pos) {
+      const seg = [o.fact, o.view ? `解讀：${o.view}` : null].filter(Boolean).join("｜");
+      paras.push(`${o.market ? `【${o.market}】` : ""}${seg}`);
+    }
+  }
+  const wk = (Array.isArray(j.week_events) ? j.week_events : []).filter((o) => o && o.what);
+  if (wk.length) {
+    paras.push("## 本週關鍵事件");
+    for (const o of wk) paras.push(`${o.when ? `${o.when}：` : ""}${o.what}`);
+  }
+  if (j.quote) {
+    paras.push("## 今日一句話");
+    paras.push(String(j.quote));
+  }
+  const body = paras.map((x) => fxNeutralize(x)).filter(Boolean);
+  // 只剩段標＝四段內容全空 → skip（top3 空、positioning 空…逐段容錯，全空才整卡不出）
+  if (!body.some((x) => !x.startsWith("##"))) return { skip: "daily-brief 內容為空" };
+  return {
+    kind: "longform",
+    title: "每日晨報",
+    sub: `AI 彙整 · ${date}${j.edition != null ? ` 第${j.edition}期` : ""}`,
+    paras: body,
+    note: "本卡由 AI 彙整晨間公開資訊，不含買賣點位與操作建議；完整內容見網頁版晨報。",
+    disclaimer: "本卡由 AI 依晨間公開資訊彙整，僅供參考，非投資建議",
   };
 }
 
@@ -2111,8 +2289,19 @@ const CARDS_TEXT_MAX = 4900;
 // manifest＝Actions cards.yml（台北 22:12）用 Pillow 渲染 /cards/data 後 commit 的
 // data/cards/latest/manifest.json——pushDailyCards 只在 manifest.date==今日時把 PNG 掛進
 // Flex hero（spec 3C 呈現層改向），非當日／缺檔一律文字版（昨日圖絕不誤用）。
-export function cardSourceUrls(env, dateISO) {
+// slot="am"（2026-08-10）：晨間場只抓 AM 四卡用得到的源——morning2/3/4＝morning／
+// daysummary／us、晨報卡＝dailyBrief；不含 manifest（AM 的 manifest 在 data/cards/am/，
+// 由 pushMorningCards 自行帶破快取抓，避免此處重複 fetch）。預設 "pm" 回既有 15 支不變。
+export function cardSourceUrls(env, dateISO, slot = "pm") {
   const V2 = env.DATA_BASE;
+  if (slot === "am") {
+    return {
+      daysummary: `${V2}/daysummary/latest.json`,
+      morning:    `${V2}/morning.json`,
+      us:         `${V2}/us.json`,
+      dailyBrief: DAILY_BRIEF_URL,
+    };
+  }
   return {
     daysummary:     `${V2}/daysummary/latest.json`,
     baseline:       `${V2}/baseline.json`,
@@ -2139,7 +2328,7 @@ export function cardSourceUrls(env, dateISO) {
 // opts.noVix：/cards/data 端點用（FX_ACTIVE_CARDS 11 張皆不用 vix，公開端點不必打 FinMind）。
 export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
   const getP = opts.getProduct || ((u) => fetchProduct(u, fetchFn).catch(() => null));
-  const urls = cardSourceUrls(env, tp.date);
+  const urls = cardSourceUrls(env, tp.date, opts.slot || "pm");
   const src = { dateStr: tp.date, vix: null };
   await Promise.all(Object.entries(urls).map(async ([k, u]) => {
     try { src[k] = await getP(u); } catch { src[k] = null; }
@@ -2155,8 +2344,38 @@ export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
 // 縱深過濾後的卡片資料（與 pushDailyCards ⑤ 同一套守門——PNG 與文字版看到同一份內容）。
 // 資料全是公開 raw JSON 的加工，無需鑑權；noVix＝活躍 11 張皆不用 vix，不打 FinMind。
 export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
-  const src = await fetchCardSources(env, tp, fetchFn, { ...opts, noVix: true });
-  const built = buildDailyCards(src);
+  const slot = opts.slot === "am" ? "am" : "pm";
+  const src = await fetchCardSources(env, tp, fetchFn, { ...opts, slot, noVix: true });
+  const built = buildDailyCards(src);   // AM：morning2/3/4 由既有 builder 表組出（其餘卡因源缺自然 skip）
+  if (slot === "am") {
+    // 晨報卡不在 FX_CARD_BUILDERS（避免污染晚間 skipped 觀測），此處單獨組裝
+    let brief = null;
+    try {
+      const c = fxCardMorningBrief(src);
+      if (c && !c.skip) brief = { id: FX_AM_LONGFORM_CARD, ...c };
+      else if (c && c.skip) console.log("cards/data(am) 晨報卡 skip:", c.skip);
+    } catch (e) { console.log("cards/data(am) 晨報卡:", e && e.message); }
+    const candidates = brief ? [brief, ...built.cards] : built.cards;
+    // AM 新鮮度守門（**不用**晚間 baseline gate——早上 baseline 必為昨日，套用必然全滅）：
+    //   晨報卡 am-brief-1 → daily-brief-card.json 的 date 為台北今日；
+    //   morning2/3/4     → morning.json 的 generated_at 台北日為今日（morning 管線今晨跑過）。
+    // 不新鮮的卡直接不進 payload；全部不新鮮 → 空卡清單＋date=null（Python 拒渲染）。
+    const briefFresh = !!(src.dailyBrief && String(src.dailyBrief.date || "").slice(0, 10) === tp.date);
+    const morningFresh = !!(src.morning && taipeiDayOf(src.morning.generated_at) === tp.date);
+    const amCards = [];
+    for (const c of candidates) {
+      if (!FX_AM_CARDS.has(c.id)) continue;
+      if (c.id === FX_AM_LONGFORM_CARD ? !briefFresh : !morningFresh) continue;
+      try { assertCardAllowed(c); amCards.push(c); }
+      catch (e) { console.log("cards/data(am) 過濾剔除:", c.id, e && e.message); }
+    }
+    // date＝資料日（manifest 語意同晚間）：AM 各卡守門都要求「資料日＝台北今日」，
+    // 有卡必為今日——晨報新鮮取 dailyBrief.date（規格指定），只剩 morning 三卡時取 tp.date
+    // （morning gate 已保證其 generated_at 台北日＝今日，兩者恆等）。
+    const amDate = amCards.length
+      ? (briefFresh ? String(src.dailyBrief.date).slice(0, 10) : tp.date) : null;
+    return { date: amDate, slot, renderedFor: src.dateStr, cards: amCards };
+  }
   const cards = [];
   for (const c of built.cards) {
     // 長文卡不在 FX_ACTIVE_CARDS（不進 carousel），但要出現在 /cards/data 讓 Python 渲染
@@ -2194,11 +2413,11 @@ export function attachCardImages(cards, manifest, dateISO) {
 // 全通道失敗 → 拋錯（不寫 KV，下輪自動重試；接線層負責 alertJob 告警）。
 // 長文圖取用守門：manifest 當日、原圖與預覽都在、都是 https。任一不成立回 null＝
 // 當晚沒有長文圖（Flex carousel 完全不受影響——長文是純附加）。
-export function longformImage(manifest, dateISO) {
+export function longformImage(manifest, dateISO, cardId = FX_LONGFORM_CARD) {
   const m = manifest || {};
   if (String(m.date || "") !== dateISO) return null;
-  const url = (m.images || {})[FX_LONGFORM_CARD];
-  const preview = (m.previews || {})[FX_LONGFORM_CARD];
+  const url = (m.images || {})[cardId];
+  const preview = (m.previews || {})[cardId];
   if (typeof url !== "string" || !url.startsWith("https://")) return null;
   if (typeof preview !== "string" || !preview.startsWith("https://")) return null;
   return { url, preview };
@@ -3068,6 +3287,9 @@ export default {
         ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
       } else if (droute.kind === "summary-am") {
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
+        // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
+        // 08:20–08:50 推播；runMorning 內部各步已 try/catch，絕不影響上面的 summary-am
+        ctx.waitUntil(runMorning(env, tp).catch((e) => console.log("morning-cards:", e && e.message)));
       }
       return;
     }
@@ -3164,14 +3386,17 @@ export default {
       return json(body, { "Cache-Control": "public, max-age=1800" });
     }
     if (url.pathname === "/cards/data") {  // LINE 圖卡資料（PNG 渲染管線上游，spec 3C）
-      // cf 快取 5 分鐘（caches.default，同 /live 慣例）：Actions 22:12 渲染班打一次、
+      // cf 快取 5 分鐘（caches.default，同 /live 慣例）：Actions 渲染班打一次、
       // 其餘流量吃快取；來源全為公開 raw JSON 的加工，無需鑑權。
+      // ?slot=am（2026-08-10）＝晨間場。cacheKey 把 slot 併進 path——caches.default 的
+      // 快取鍵原本丟棄 query string，am/pm 若共用同一鍵，5 分內互打會拿到對方的卡。
+      const slot = url.searchParams.get("slot") === "am" ? "am" : "pm";
       const cache = caches.default;
-      const cacheKey = new Request(new URL("/cards/data", url.origin).toString());
+      const cacheKey = new Request(new URL(`/cards/data/${slot}`, url.origin).toString());
       const hit = await cache.match(cacheKey);
       if (hit) return hit;
       try {
-        const body = await buildCardsData(env, taipeiParts(), fetch);
+        const body = await buildCardsData(env, taipeiParts(), fetch, { slot });
         const resp = json(body, { "Cache-Control": "public, max-age=300" });
         ctx.waitUntil(cache.put(cacheKey, resp.clone()));
         return resp;

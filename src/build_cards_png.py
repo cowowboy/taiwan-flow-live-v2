@@ -20,9 +20,15 @@
 #
 # 用法：
 #   python src/build_cards_png.py                        # 打 WORKER_BASE /cards/data
+#   python src/build_cards_png.py --slot am              # 晨間場：/cards/data?slot=am → data/cards/am
 #   python src/build_cards_png.py --offline fixture.json # 本地 JSON（測試用，免網路）
 #   WORKER_BASE=https://... 覆蓋 Worker base（預設 taiwan-flow-v2.shihpc.workers.dev）
-#   --out DIR 覆蓋輸出目錄（預設 data/cards/latest）
+#   --worker URL 覆蓋 Worker base（優先於 WORKER_BASE，本機驗證用）
+#   --out DIR 覆蓋輸出目錄（預設依 slot：pm=data/cards/latest、am=data/cards/am）
+#
+# AM slot（2026-08-10 晨間管線）：--slot am 時輸出目錄與 RAW_BASE 都改指 data/cards/am/
+# ——與晚間 data/cards/latest/ 分目錄，開場清 *.png 時互不誤刪；manifest 語意不變
+# （date＝資料日，AM 由 Worker 以晨間源的新鮮度守門後給出）。
 
 from __future__ import annotations
 
@@ -37,9 +43,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
-RAW_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest"
-OUT_DIR = ROOT / "data" / "cards" / "latest"
+# slot → 輸出子目錄（pm 沿用 latest 不改名；am 用自己的目錄，清 *.png 時互不誤刪）
+SLOT_DIRS = {"pm": "latest", "am": "am"}
+RAW_BASE_ROOT = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards"
+RAW_BASE = f"{RAW_BASE_ROOT}/latest"          # pm 預設（向後相容）
+OUT_DIR = ROOT / "data" / "cards" / "latest"  # pm 預設（向後相容）
 FONT_DIR = ROOT / "fonts"
+
+
+def raw_base_for(slot: str) -> str:
+    return f"{RAW_BASE_ROOT}/{SLOT_DIRS[slot]}"
+
+
+def out_dir_for(slot: str) -> Path:
+    return ROOT / "data" / "cards" / SLOT_DIRS[slot]
 
 W = 1040                      # 固定寬
 ROW_H = 96                    # 排行卡每列高
@@ -260,12 +277,20 @@ def draw_footer(draw, y: int, lines, F_R, disc: str | None = None) -> int:
 
 
 def render_ranking(card, F_B, F_R):
-    """排行卡：名次圓章＋代號＋名稱＋金色比例橫條＋右側數值。"""
+    """排行卡：名次圓章＋代號＋名稱＋金色比例橫條＋右側數值。
+
+    rows 之後若有 paras 一併排出（左對齊小字）：晨間三卡（news-morning-2/3/4）是
+    rows＋paras 並用的卡，掛 hero 圖後 Flex body 精簡、paras 只能靠圖呈現——不畫等於
+    內容變薄（2026-08-10 AM slot 補上）。晚間 11 張活躍卡皆無 rows＋paras 並用
+    （paras 卡走 render_paras），此段對既有晚間輸出零影響。"""
     from PIL import Image, ImageDraw
     rows = card.get("rows") or []
     probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
     flines = footer_lines(probe, card, F_R)
-    h = HEADER_H + len(rows) * ROW_H + 24 + (18 + len(flines) * 34 + 34 + 18)
+    pf = F_R(30)
+    pblocks = [wrap_text(probe, str(p), pf, W - 2 * PAD) for p in (card.get("paras") or [])]
+    p_h = (16 + sum(len(b) for b in pblocks) * 44 + len(pblocks) * 12) if pblocks else 0
+    h = HEADER_H + len(rows) * ROW_H + p_h + 24 + (18 + len(flines) * 34 + 34 + 18)
     img = gradient_bg(h)
     draw = ImageDraw.Draw(img)
     draw_header(draw, card, F_B, F_R)
@@ -314,6 +339,13 @@ def render_ranking(card, F_B, F_R):
         if i < len(rows) - 1:
             draw.line([(PAD, y + ROW_H), (W - PAD, y + ROW_H)], fill=C_DIVIDER, width=1)
         y += ROW_H
+    if pblocks:   # rows 後的文字段（晨間卡 rows＋paras 並用；晚間活躍卡無此情形）
+        y += 16
+        for b in pblocks:
+            for ln in b:
+                draw.text((PAD, y), ln, font=pf, fill=C_NEUTRAL)
+                y += 44
+            y += 12
     draw_footer(draw, y + 20, flines, F_R)
     return img
 
@@ -447,8 +479,10 @@ def render_card(card, F_B, F_R):
 _UA = "taiwan-flow-live-v2-cards/1.0 (+https://github.com/shihpc/taiwan-flow-live-v2)"
 
 
-def fetch_cards(worker_base: str) -> dict:
+def fetch_cards(worker_base: str, slot: str = "pm") -> dict:
     url = f"{worker_base.rstrip('/')}/cards/data"
+    if slot != "pm":
+        url += f"?slot={slot}"   # Worker 端 am/pm 各有 cache key（slot 併進 cacheKey path）
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=60) as r:   # noqa: S310（固定 https base）
         return json.loads(r.read().decode("utf-8"))
@@ -479,7 +513,7 @@ def fit_line_limit(img):
     return img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
 
 
-def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
+def build_all(data: dict, out_dir: Path, F_B, F_R, raw_base: str = RAW_BASE) -> dict:
     from PIL import Image
     # date ＝ Worker /cards/data 回的**資料日**（baseline.date），非渲染當日。
     # 缺或格式不對就拒渲染：manifest 沒有可信日期時，寧可當晚退文字版，
@@ -531,10 +565,10 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
                 path.unlink(missing_ok=True)
                 pv.unlink(missing_ok=True)
                 continue
-            previews[cid] = f"{RAW_BASE}/{cid}-preview.png?d={date}"
+            previews[cid] = f"{raw_base}/{cid}-preview.png?d={date}"
             print(f"  {cid}-preview.png  {min(W, img.height)}x{min(W, img.height)}  {pv_size}B")
         # URL 帶日期 query 破 LINE 端快取（同一路徑隔日換圖，LINE CDN 會沿用舊圖）
-        images[cid] = f"{RAW_BASE}/{cid}.png?d={date}"
+        images[cid] = f"{raw_base}/{cid}.png?d={date}"
         ratios[cid] = f"{img.width}:{img.height}"
         print(f"  {cid}.png  {img.width}x{img.height}  {size}B")
     tz8 = timezone(timedelta(hours=8))
@@ -547,9 +581,12 @@ def build_all(data: dict, out_dir: Path, F_B, F_R) -> dict:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="LINE 圖卡 PNG 渲染（/cards/data → data/cards/latest）")
+    ap = argparse.ArgumentParser(description="LINE 圖卡 PNG 渲染（/cards/data → data/cards/<slot>）")
+    ap.add_argument("--slot", choices=sorted(SLOT_DIRS), default="pm",
+                    help="場次：pm=盤後（data/cards/latest）、am=晨間（data/cards/am）")
     ap.add_argument("--offline", metavar="FIXTURE", help="本地 JSON 取代 /cards/data（測試用）")
-    ap.add_argument("--out", default=str(OUT_DIR), help="輸出目錄（預設 data/cards/latest）")
+    ap.add_argument("--worker", help="Worker base URL（優先於 WORKER_BASE 環境變數；本機驗證用）")
+    ap.add_argument("--out", help="輸出目錄（預設依 slot：pm=data/cards/latest、am=data/cards/am）")
     ap.add_argument("--font-dir", default=str(FONT_DIR), help="字型目錄（預設 <repo>/fonts）")
     ap.add_argument("--font-fallback", action="store_true",
                     help="缺字型時用預設字型驗版型（中文豆腐字；正式管線不得使用）")
@@ -559,12 +596,13 @@ def main(argv=None):
     if args.offline:
         data = json.loads(Path(args.offline).read_text(encoding="utf-8"))
     else:
-        base = os.environ.get("WORKER_BASE", DEFAULT_WORKER)
-        data = fetch_cards(base)
+        base = args.worker or os.environ.get("WORKER_BASE", DEFAULT_WORKER)
+        data = fetch_cards(base, args.slot)
     if not isinstance(data, dict) or "cards" not in data:
         raise SystemExit(f"ERROR: /cards/data 回應非預期：{str(data)[:200]}")
-    manifest = build_all(data, Path(args.out), F_B, F_R)
-    print(f"完成：{len(manifest['images'])} 張 → {args.out}（date={manifest['date']}）")
+    out_dir = Path(args.out) if args.out else out_dir_for(args.slot)
+    manifest = build_all(data, out_dir, F_B, F_R, raw_base=raw_base_for(args.slot))
+    print(f"完成：{len(manifest['images'])} 張 → {out_dir}（slot={args.slot} date={manifest['date']}）")
 
 
 if __name__ == "__main__":
