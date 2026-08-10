@@ -125,11 +125,17 @@
 
 ```bash
 cd worker && npm run dev            # 本機 Worker
-cd worker && npm run deploy         # 部署
+cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
 node test/sentinel.mjs              # 其餘 17 支要個別跑（離線、免 token）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
+
+**Worker 已自動部署**（2026-08-11 起，`worker-deploy.yml`）：push 到 main 且動到 `worker/**`
+就跑 `worker/test/*.mjs` 全部（glob，新增測試自動納入、不寫死支數），全綠才 `wrangler deploy`。
+所以改 Worker 不再需要手動部署，push 即完成交付。
+需 repo secrets `CLOUDFLARE_API_TOKEN` 與 `CLOUDFLARE_ACCOUNT_ID`（缺任一會在第一步就明確報錯）。
+測試是離線 mock，擋得住語法與邏輯回歸，擋不住「mock 對但 workerd 實際行為不同」的問題。
 
 密鑰全走 `wrangler secret put`、不寫檔：`FINMIND_TOKEN`、`GH_DISPATCH_TOKEN`
 （fine-grained PAT，對 **taiwan-flows／postmkt／taiwan-stock-news ＋本 repo taiwan-flow-live-v2
