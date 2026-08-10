@@ -547,6 +547,10 @@ commit → Pages 供 HTTPS URL → Flex bubble hero 引用；PNG 缺席退文字
   只取「盤勢綜合研判」一節（約 287 字，不是全文）。
 - **降級**：長文任一步失敗（摘要未就緒／日期不符／渲染超標／manifest 無圖）都只是
   「當晚沒有這則圖」，Flex carousel 完全不受影響。
-- **尚未做**：am 場。整條晚班從渲染到推播只有一班，`pushDailyCards` 無 slot 參數、
-  KV 去重鍵與時間窗都硬編碼，且早上最新 baseline 是前一交易日、日期閘門會擋下。
+- **am 場（2026-08-10 已實作，見 CLAUDE.md「晨間 LINE 圖卡」節）**：獨立於晚班——
+  `build_cards_png.py --slot am` 輸出 `data/cards/am/`、Worker 端 `buildCardsData(slot)`
+  ＋ `runMorning`／`pushMorningCards`（時窗 08:20–08:50、dedup `cards-am`）；晨報長圖
+  `am-brief-1` 資料源為 taiwan-stock-news 的 `daily-brief-card.json`（date 閘門用該檔
+  date，不用晚間 baseline），昨日市場三卡重啟 fxCardMorning2/3/4（morning.json
+  generated_at 台北日閘門）。晚班 `pushDailyCards` 維持無 slot、硬編碼不動。
 
