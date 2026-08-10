@@ -1,6 +1,10 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-08-10 晚間（**本批 Worker 改動已部署並通過第一晚實測**：deploy version `0ad82dc4`、
+最後更新：2026-08-11 凌晨（**Worker 部署已自動化**：新增 `.github/workflows/worker-deploy.yml`
+（commit `ebc9347`），push 動到 `worker/**` → 跑完 `worker/test/*.mjs` 全綠才 `wrangler deploy`；
+**首次自動部署已成功**：deploy version `064ae934`、commit `ebc9347`，一併把先前「已 push 未部署」
+的晨間 LINE 圖卡（commit `5169eef`）帶上線。詳見「快速接手」的部署條目）
+前一版：2026-08-10 晚間（**本批 Worker 改動已部署並通過第一晚實測**：deploy version `0ad82dc4`、
 commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的 `cards` 事件
 `via=line-flex cards=11 imgs=11 lf=attached manifest=today`，使用者手機實機確認有 hero 圖），
 `appendSeries` 去重排序產出全綠（`data/intraday/2026-08-10.json` 276 筆、嚴格遞增、零重複）。
@@ -359,7 +363,47 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
       **這不是缺陷**：manifest 等到窗尾就不再走等待分支，而是往下走完整推播流程並記終局
       `pushed`（或 `error`），**觀測不會留白**。
 
-- **✅ 本批 Worker 改動已部署（2026-08-10 凌晨，台北）**：`cd worker && npm run deploy`，
+- **✅ 現行線上版本＝deploy version `064ae934-3ca6-4f40-af1b-a890976032bb`（短碼 `064ae934`）、
+  commit `ebc9347`（2026-08-10T17:20:46Z ＝台北 2026-08-11 01:20）**。
+  **這是第一次「自動」部署**——經 `.github/workflows/worker-deploy.yml`（GH run `31412081703`），
+  不是手動 `npm run deploy`。
+  - **與前一版 `0ad82dc4` 的差異（重要）**：`0ad82dc4` 是使用者手動 `npm run deploy` 部署的，
+    **不含晨間 LINE 圖卡**；`064ae934` 涵蓋到 `ebc9347` 為止的**全部** Worker 變更，
+    **其中包含 commit `5169eef`「晨間 LINE 圖卡（AM slot）」**。那是**另一個 session** 的工作，
+    在本自動部署 workflow 建立之前 push，原本卡在「已 push 未部署」狀態，這次一併上線。
+    ⚠️ **本條只宣告「晨間圖卡的程式碼已隨本次部署上線」，不代表其功能已驗收**
+    ——該功能的驗收條件與實作屬另一個 session，**其行為面在此屬未驗**，勿當已完成。
+  - **run 的 `run_attempt: 2`，第一次紅燈是設計預期、不是故障**：首跑在「檢查 secrets 是否齊備」
+    那步失敗（當時 repo secrets 尚未設定），**守門正確擋下無憑證的部署**；使用者補上
+    `CLOUDFLARE_API_TOKEN` 與 `CLOUDFLARE_ACCOUNT_ID` 後重跑，**8 個步驟全綠**
+    （含跑完 `worker/test/*.mjs` 全部與 `wrangler deploy`）。
+  - **線上驗證（已實打線上端點）**：`/cards/data?slot=am` 回傳 JSON **多出 `slot` 欄位**（值 `am`），
+    而不帶 slot 或 `slot=pm` 時**沒有**此欄位——**這個分支只存在於晨間圖卡的新程式碼，
+    是新版已生效的直接證據**。`/live` 回 200、無退化。
+  - **該端點當下 `cards=0`、`date=null` 是正確行為、不是壞掉**：查詢時為台北凌晨 01:21，
+    晨報資料尚未產出，**新鮮度守門判定不新鮮就回空卡**讓 Python 端拒渲染。
+
+- **✅ Worker 部署已自動化（2026-08-10，commit `ebc9347`，新增 `.github/workflows/worker-deploy.yml`）**：
+  push 到 main 且動到 `worker/**` → 跑 `worker/test/*.mjs` **全部**（用 glob，**不寫死支數**，
+  新增測試檔自動納入）→ 全綠才 `wrangler deploy` → **Version ID 寫進 run summary**。
+  - **意義（為何值得單獨記一條）**：先前 repo 裡 **12 支 workflow 沒有任何一支部署 Worker**，
+    **只有 Worker 是手動部署**。後果是**雲端 session 改完 Worker 只能 push、無法完成交付**
+    （依交付紀律「只寫在本機／只 push 不算完成」）——`0ad82dc4` 與 `5169eef` **都因此卡過**。
+    **現在 push 即完成交付。**
+  - **設計取捨（刻意如此，勿當缺陷「修掉」）**：
+    ① **不設「測試失敗仍部署」的旁路**——Worker 是**全系統排程觸發中樞**
+    （哨兵／新聞班／晨報班／晚場班，**五個站都依賴**），寧可不部署也不要部署壞的；
+    ② **缺 secret 直接紅燈，而非靜默略過**——部署 workflow 沒部署成功就不該是綠燈。
+  - **已知限制**：測試是**離線 mock**，擋得住語法錯誤與邏輯回歸，
+    **擋不住「mock 對但 workerd 實際行為不同」的問題**。
+    現成例子就是下方待驗清單裡 `AbortSignal.timeout` 在 workerd 的行為那項——**至今仍未驗**，
+    這條 workflow 全綠**也不會**驗到它。
+  - **前置條件**：需 repo secrets `CLOUDFLARE_API_TOKEN` 與 `CLOUDFLARE_ACCOUNT_ID`
+    （`wrangler.toml` **未寫 `account_id`**，故後者不可省）。
+
+- **✅ 本批 Worker 改動已部署（2026-08-10 凌晨，台北）**
+  ——**已被上方 `064ae934` 取代，本條保留為歷史紀錄**；下方的實測結論與待驗清單**仍然有效**
+  （`064ae934` 是它的超集）：`cd worker && npm run deploy`，
   **deploy version `0ad82dc4-2d36-49d3-be2d-7043f92369b3`（短碼 `0ad82dc4`）、commit `ab8c766`**。
   部署後線上健康檢查通過（**已驗證，實打線上端點**）：`/live` HTTP 200、**2771 檔個股**、
   **47 條產業鏈**，頂層結構完整（`chain`／`chain_coverage`／`exchange`／`flow`／`flow_last`／
