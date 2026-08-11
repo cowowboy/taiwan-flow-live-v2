@@ -115,6 +115,16 @@
   → Python 拒渲染。
 - 測試：`node test/morningcards.mjs`。
 
+## /status 全系統資料健康端點（2026-08-11，新資料規範 schema:1 首例）
+
+`GET /status` 回五站（live／flows／news／brief／postmkt）的 `data_date`／`updated_at`／
+紅黃綠 `level`（`export async function buildStatus`，cf 快取 5 分）。來源：live 讀本站 KV
+`fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`（小檔）；news／brief 抓
+`taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；postmkt 因 `postmkt.json` 逾
+1.6MB，以 **Range 只取檔頭** regex 撈 date/generated_at。判級為純函式（`gradeMarket`／
+`gradeNews`／`gradeBrief`，台北時區、**國定假日不處理**）；單站失敗只染紅該站不垮端點。
+測試 `node test/status.mjs`。
+
 ## 資料是姊妹站上游（跨站變更）
 
 `taiwan-stock-news` 讀 `data/morning.json`；`postmkt` 讀 `data/aetf/latest.json`（含
@@ -127,7 +137,7 @@
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 17 支要個別跑（離線、免 token）
+node test/sentinel.mjs              # 其餘 18 支要個別跑（離線、免 token）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 

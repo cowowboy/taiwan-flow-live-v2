@@ -3260,6 +3260,139 @@ async function syncKey(code) {
   return "usw:" + [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+// ---- /status 全系統資料健康端點（新資料規範 schema:1 首例，2026-08-11）----
+// 五站一覽：live（本站 KV）／flows／news／brief／postmkt（跨 repo raw JSON）。
+// 單站失敗不拖垮端點（Promise.allSettled）；判級為可測純函式，台北時區。
+
+// 日期加減（YYYY-MM-DD 字串運算，不碰本地時區）
+export function addDaysISO(dateISO, days) {
+  const t = new Date(dateISO + "T00:00:00Z");
+  t.setUTCDate(t.getUTCDate() + days);
+  return t.toISOString().slice(0, 10);
+}
+// 最近預期交易日：平日＝今天、週末＝上週五。國定假日不處理（簡化：連假日仍以平日計，
+// 假日當天會誤判 yellow/red，屬已知可接受誤差）。
+export function lastExpectedTradingDate(tp) {
+  if (tp.dow >= 1 && tp.dow <= 5) return tp.date;
+  return addDaysISO(tp.date, tp.dow === 6 ? -1 : -2);   // 週六退1天、週日退2天到週五
+}
+// 往前一個預期交易日（跳過週末；同樣不處理國定假日）
+export function prevExpectedTradingDate(dateISO) {
+  let d = dateISO;
+  do { d = addDaysISO(d, -1); } while (["0", "6"].includes(String(new Date(d + "T00:00:00Z").getUTCDay())));
+  return d;
+}
+// 市場資料類判級（live/flows/postmkt）：資料日 ≥ 最近預期交易日 → green；
+// 落後 1 個交易日 → yellow；更舊或無日期 → red。
+export function gradeMarket(dataDate, tp) {
+  if (!dataDate) return "red";
+  const exp = lastExpectedTradingDate(tp);
+  if (dataDate >= exp) return "green";
+  if (dataDate >= prevExpectedTradingDate(exp)) return "yellow";
+  return "red";
+}
+// news 判級：generated_at 距今 ≤3 小時 green、≤24 小時 yellow、否則（含無法解析）red
+export function gradeNews(generatedAt, nowMs) {
+  const t = Date.parse(generatedAt || "");
+  if (!Number.isFinite(t)) return "red";
+  const hours = (nowMs - t) / 3600e3;
+  return hours <= 3 ? "green" : hours <= 24 ? "yellow" : "red";
+}
+// brief 判級：date＝今天（平日）→ green；date＝昨天、或今天是週末（date 不舊於上週五）→ yellow；
+// 更舊 → red。
+export function gradeBrief(dataDate, tp) {
+  if (!dataDate) return "red";
+  const weekday = tp.dow >= 1 && tp.dow <= 5;
+  if (!weekday) return dataDate >= lastExpectedTradingDate(tp) ? "yellow" : "red";
+  if (dataDate === tp.date) return "green";
+  return dataDate === addDaysISO(tp.date, -1) ? "yellow" : "red";
+}
+// epoch ms → ISO8601 +08:00（秒級）
+export function isoTaipei(ms) {
+  return new Date(ms + 8 * 3600e3).toISOString().slice(0, 19) + "+08:00";
+}
+// 從 JSON 檔頭文字撈 date/generated_at（postmkt.json 逾 1.6MB，只抓 Range 檔頭時用；
+// 兩欄位是該檔前兩個 key，regex 取值即可，不需完整 parse）
+export function extractHeadFields(text) {
+  return {
+    date: (String(text).match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/) || [])[1] || null,
+    generated_at: (String(text).match(/"generated_at"\s*:\s*"([^"]+)"/) || [])[1] || null,
+  };
+}
+// 小檔 JSON 來源（<300KB）：整包抓＋parse
+async function fetchStatusJson(fetchFn, url) {
+  const r = await fetchFn(url, { signal: timeoutSignal() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+// 大檔來源：Range 只取檔頭（raw.githubusercontent.com 支援 Range，實測回 206）；
+// 若 CDN 忽略 Range 回 200 全檔，改用 reader 讀首塊即止，不把整包載入記憶體。
+async function fetchStatusHead(fetchFn, url, bytes = 2048) {
+  const r = await fetchFn(url, { headers: { Range: `bytes=0-${bytes - 1}` }, signal: timeoutSignal() });
+  if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
+  if (r.status === 206 || !r.body || !r.body.getReader) return r.text();
+  const reader = r.body.getReader();
+  const { value } = await reader.read();
+  reader.cancel().catch(() => {});
+  return new TextDecoder().decode(value || new Uint8Array());
+}
+// live：直接用本站 KV 的 fi 索引（同 `/` 根路徑 health 區塊做法，不外抓）。
+// 依序查最近兩個預期交易日的 frame 索引，第一個非空者為資料日。
+async function statusSiteLive(env, tp) {
+  const exp = lastExpectedTradingDate(tp);
+  for (const d of [exp, prevExpectedTradingDate(exp)]) {
+    const fi = env.FLOW_KV ? await env.FLOW_KV.get(`fi:${d}`, "json") : null;
+    if (fi && fi.length) {
+      const lastHm = fi.reduce((a, b) => (b > a ? b : a));   // 索引為 HH:MM 字串，取最大值最穩
+      return { data_date: d, updated_at: `${d}T${lastHm}:00+08:00`, note: `${d} 共 ${fi.length} 格 frame` };
+    }
+  }
+  return { data_date: null, updated_at: null, note: "近兩個交易日 KV 無 frame" };
+}
+// /status 主體：五站併發、單站失敗只染紅該站
+export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) {
+  const FLOWS_STATUS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/status.json";
+  const NEWS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
+  const BRIEF_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
+  const POSTMKT_URL = `${POSTMKT_BASE}/data/postmkt.json`;
+  const defs = [
+    { id: "live", name: "即時類股動態", grade: "market", run: () => statusSiteLive(env, tp) },
+    { id: "flows", name: "盤後法人動態", grade: "market", run: async () => {
+      const j = await fetchStatusJson(fetchFn, FLOWS_STATUS);   // 353B 小檔
+      return { data_date: j.date || null, updated_at: j.checked_at || null, note: `健檢 ${j.status || "unknown"}` };
+    } },
+    { id: "news", name: "新聞晨報", grade: "news", run: async () => {
+      const j = await fetchStatusJson(fetchFn, NEWS_URL);   // ~200KB，<300KB 門檻內
+      const days = Array.isArray(j.trading_days) ? j.trading_days : [];
+      return { data_date: days[days.length - 1] || (j.generated_at || "").slice(0, 10) || null,
+        updated_at: j.generated_at || null, note: `${j.total_news || 0} 則新聞` };
+    } },
+    { id: "brief", name: "每日晨報", grade: "brief", run: async () => {
+      const j = await fetchStatusJson(fetchFn, BRIEF_URL);   // ~4KB 小檔
+      return { data_date: j.date || null, updated_at: j.generated_at || null,
+        note: j.edition ? `第 ${j.edition} 版` : "" };
+    } },
+    { id: "postmkt", name: "盤後分析", grade: "market", run: async () => {
+      const h = extractHeadFields(await fetchStatusHead(fetchFn, POSTMKT_URL));   // 1.6MB 大檔只取 Range 檔頭
+      return { data_date: h.date, updated_at: h.generated_at, note: "" };
+    } },
+  ];
+  const results = await Promise.allSettled(defs.map((d) => d.run()));
+  const sites = defs.map((d, i) => {
+    const r = results[i];
+    if (r.status !== "fulfilled") {
+      return { id: d.id, name: d.name, data_date: null, updated_at: null, level: "red",
+        note: `來源抓取失敗: ${String(r.reason && r.reason.message || r.reason)}` };
+    }
+    const v = r.value;
+    const level = d.grade === "news" ? gradeNews(v.updated_at, nowMs)
+      : d.grade === "brief" ? gradeBrief(v.data_date, tp)
+      : gradeMarket(v.data_date, tp);
+    return { id: d.id, name: d.name, data_date: v.data_date, updated_at: v.updated_at, level, note: v.note || "" };
+  });
+  return { schema: 1, generated_at: isoTaipei(nowMs), status: "ok", sites };
+}
+
 // ---- HTTP ----
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" };
 const json = (obj, extra) => new Response(JSON.stringify(obj), {
@@ -3493,6 +3626,22 @@ export default {
         return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
+    if (url.pathname === "/status") {  // 全系統資料健康端點（五站紅黃綠；新資料規範 schema:1 首例）
+      // cf 快取 5 分鐘：cacheKey 用獨立 path（同 /cards/data 慣例——caches.default 丟棄
+      // query string，獨立 path 可避免與其他路由互踩；/status 本身無參數，固定一鍵）。
+      const cache = caches.default;
+      const cacheKey = new Request(new URL("/status/v1", url.origin).toString());
+      const hit = await cache.match(cacheKey);
+      if (hit) return hit;
+      try {
+        const body = await buildStatus(env, taipeiParts(), fetch);
+        const resp = json(body, { "Cache-Control": "public, max-age=300" });
+        ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+      } catch (e) {   // buildStatus 內已 allSettled，理論上不拋；此處為最後保險
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname === "/alerts/log") {  // 第九期：近 24h 事件紀錄（單 key 1 get，無 list）
       try {
         const lg = (await env.FLOW_KV.get(ALERTS_LOG_KEY, "json")) || { ev: [] };
@@ -3505,7 +3654,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/cards/data", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening", "/health", "/jobs"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/usersync", "/uswatch", "/fundamentals", "/chips", "/technical", "/replay", "/cards/data", "/line/webhook", "/alerts/test", "/alerts/log", "/backup", "/sumcheck", "/evening", "/health", "/jobs", "/status"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {
