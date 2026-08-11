@@ -1502,28 +1502,31 @@ function ovRrgSideHtml(rows,picks){
 function ovRrgHtml(){
   OV_RRG_DREW=false;      // 只有走到最後真的產出 SVG 才翻 true（見宣告處）
   ovRrgBaseLoad();
+  // 盤後日頻版互連（規格 rrg-daily-spec-20260811 §4 第三階段完成定義第 6 條）：
+  // 連結不依賴盤中資料，四條降級路徑（盤外／資料不足）也一律附上——降級時反而更該去看盤後版。
+  const dailyLink=`<div class="ovtfoot">看更長時間尺度的輪動 → <a href="https://shihpc.github.io/postmkt/" target="_blank" rel="noopener" style="color:var(--accent)">盤後日頻版</a>（postmkt 盤後分析站的「輪動雷達」tab）。兩者不是同一張圖：盤中版＝今日資金流（成交佔比 vs 自身 5 日基準，逐 10 分鐘）；盤後版＝跨週跨月的價格相對強弱（相對大盤，逐日）。</div>`;
   // 降級①：基準表缺失／載入中（builder 另案產出，缺檔時只有本視角降級，其他視角不受影響）
   if(!OV_RRG_BASE){
-    return OV_RRG_BASE_ERR
+    return (OV_RRG_BASE_ERR
       ? `<div class="loading">基準資料準備中：<b>data/rrg_base.json</b> 尚未產出或無法讀取（${escI(OV_RRG_BASE_ERR)}）。輪動雷達需要前 5 個交易日同時點的成交佔比基準，基準檔上線後本視角自動生效。</div>`
-      : `<div class="loading">基準資料載入中…</div>`;
+      : `<div class="loading">基準資料載入中…</div>`)+dailyLink;
   }
   // 降級②：盤前／凌晨（今日尚無盤中 frame，且不接 flow_last——單點撐不起軌跡）
   // 生效時刻的算法（勿憑印象改）：錨點＝floor((now−1)/10)×10（ovRrgAnchorMin），座標點還要滿足
   // m−LAG(30) ≥ TMIN(545) → 最早的座標點是 09:40；三個座標點要錨點推到 10:00，即台北 10:01 起可畫。
   // 位移異常另需 MIN_WIN=4 筆 30 分位移＝7 個座標點（09:40…10:40），故錨點 10:40／台北 10:41 起才可能觸發。
   const anchor=ovRrgAnchorMin();
-  if(anchor==null)return `<div class="loading">盤前時段：輪動雷達需要盤中累積的分鐘快照（${RRG_T0}生效）。</div>`;
+  if(anchor==null)return `<div class="loading">盤前時段：輪動雷達需要盤中累積的分鐘快照（${RRG_T0}生效）。</div>`+dailyLink;
   const T=ovRrgTimes(anchor);
-  if(T.samples.length<3)return `<div class="loading">盤中資料累積中：目前僅 ${T.samples.length} 個可用時點（軌跡至少需 3 個，${RRG_T0}生效；「位移異常」需更長的取樣視窗，${RRG_TODD}才會出現）。</div>`;
+  if(T.samples.length<3)return `<div class="loading">盤中資料累積中：目前僅 ${T.samples.length} 個可用時點（軌跡至少需 3 個，${RRG_T0}生效；「位移異常」需更長的取樣視窗，${RRG_TODD}才會出現）。</div>`+dailyLink;
   ovRrgEnsure(T.all);
   const {rows,valid}=ovRrgCompute(T);
   // 降級③：抓不到 frame（週末／假日／已過 TTL）或仍在載入
   if(!rows.length){
-    if(OV_RRG.loading)return `<div class="loading">輪動軌跡載入中…（${T.all.length} 個時點快照）</div>`;
-    return `<div class="loading">${escI(OV_RRG.err||"此時段取不到盤中快照，暫時無法繪製輪動軌跡。")}</div>`;
+    if(OV_RRG.loading)return `<div class="loading">輪動軌跡載入中…（${T.all.length} 個時點快照）</div>`+dailyLink;
+    return `<div class="loading">${escI(OV_RRG.err||"此時段取不到盤中快照，暫時無法繪製輪動軌跡。")}</div>`+dailyLink;
   }
-  if(valid.length<3)return `<div class="loading">盤中資料累積中：可用時點僅 ${valid.length} 個（軌跡至少需 3 個）。</div>`;
+  if(valid.length<3)return `<div class="loading">盤中資料累積中：可用時點僅 ${valid.length} 個（軌跡至少需 3 個）。</div>`+dailyLink;
 
   const st=state.sub.ov, picks=new Set(st.rrgPicks||[]);
   const bd=ovRrgBaseDays();   // 基準實際日期區間與新鮮度（頁尾文案與示警都據此，不寫死「前 5 日」）
@@ -1692,7 +1695,7 @@ function ovRrgHtml(){
     `目前顯示 ${nShow} 條，其餘淡化不標名（滑過可看）。當日成交額 <${OV_RRG_TINY} 億標「極小量」但不剔除——小分母會放大比值，該類位置僅供參考。`+
     `本圖只描述當下相對${baseTxt}常態的位置與 ${OV_RRG_LAG} 分鐘內的變化，象限位置不等於買賣建議，也不含預測意涵；基準僅取 ${bd?bd.n:5} 個交易日、盤中快照為分鐘級近似。雙指縮放／滾輪放大、拖曳平移、雙擊還原。</div>`;
   OV_RRG_DREW=true;
-  return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+closeNote+foot;
+  return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+closeNote+foot+dailyLink;
 }
 // 候補清單互動：切分頁／加入或移出畫布／清除選取
 document.addEventListener("click",e=>{

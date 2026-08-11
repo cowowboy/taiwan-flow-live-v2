@@ -103,6 +103,40 @@
 **跨站變更提醒**：`postmkt` 讀本站 `data/` 屬跨站依賴，改輸出格式時兩邊要一起看
 （見 `PROJECT_SUMMARY.md`「五、目前待辦與已知限制」）。
 
+### 第三階段完成定義（2026-08-12 增補）
+
+軸與參數（第二階段定案，經獨立驗收）：**B-ew**（價格版 × 等權報酬）、移動平均 n=12、
+動能回看 k=10、候補清單持續性 N=3。公式正本在 `backtest/run_rrg_daily_axes.py` 的
+`axis_systems`，前端實作必須與其對拍（合成資料或抽樣真實日對比座標）。
+
+1. postmkt 新增 tab「輪動雷達」：`TABS`／`SUBS`／`state`／`render()` 分派各一處，
+   `series.json`（594KB）走既有懶載模式（比照 `ensureMktbal()`），不進首屏
+2. 畫布：47 條鏈的 RRG 散點＋軌跡尾巴，880px 單欄（圖與清單上下堆疊，postmkt 無
+   media query）；純 SVG 零外部依賴；CSS 變數用 postmkt 自己的命名（無 `--up/--down`，
+   漲跌色寫死在 `.up/.down`）
+3. 顯示規則沿用盤中版已驗證的原則：錨點 Top 10 一律標名；候補清單完整列出不設上限；
+   淡化不刪除
+4. **文案紀律**：描述語氣。依據不是舊鐵律的字面，而是本專案回測結論——前瞻超額
+   六種切法 0/12 顯著（`backtest/report_rrg_daily_axes.md`），**資料不支持任何買賣建議**，
+   即使制度允許附依據的研判，這裡的依據明確說沒有預測力，故不得出現推薦語氣
+5. **成員重疊揭露**：UI 明示「一塊錢平均被算進 2.24 條鏈；14 條鏈的成交額 100% 來自
+   同時屬於其他鏈的成員，兩點靠近不代表獨立」（`backtest/report_chain_overlap.md`）
+6. 互連：postmkt 的 RRG tab 內加「盤中版 →」連結（不放全站 footer）；v2 盤中 RRG
+   頁尾（`ovRrgHtml()` 的 foot）加「盤後日頻版 →」連結
+7. 文件同步：postmkt 的 README／CLAUDE.md「11 個 tab」改 12；工作區 CLAUDE.md
+   專案地圖的 postmkt 說明更新
+8. 資料新鮮度：tab 內顯示 `series.json` 的最後日期；若落後今日超過 3 個交易日顯示提示
+   （baseline 班掛的增量更新若斷，這裡要看得出來）
+
+### 第三階段怎麼驗
+
+- 前端座標與 `run_rrg_daily_axes.py` 對拍：抽 3 個日期、47 條鏈的 (x,y) 誤差 < 1e-6
+- postmkt 12 個 tab 逐一切換、console 零 error（該站人工驗證慣例）
+- 手機寬度（≤880px）無橫向溢出
+- 兩站互連連結實點可達
+- fresh-context subagent 對照本節 1~8 逐項驗收，不自驗
+- 交付：postmkt push 即部署（無 workflow）；v2 走 pages.yml；兩站都要線上實查
+
 ## 5. 已定案的設計決策（沿用盤中版，除非第二階段的資料推翻）
 
 | 項目 | 決定 | 依據 |
