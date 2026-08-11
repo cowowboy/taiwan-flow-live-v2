@@ -1,24 +1,22 @@
 {
- "date": "2026-08-10",
- "generated_at": "2026-08-10T23:12:59+08:00",
+ "date": "2026-08-11",
+ "generated_at": "2026-08-11T22:00:53+08:00",
  "images": {
-  "sig-sub-surge": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-sub-surge.png?d=2026-08-10",
-  "sig-dual-buy": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-dual-buy.png?d=2026-08-10",
-  "sig-exit-sell": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-exit-sell.png?d=2026-08-10",
-  "sig-surge-warn": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-surge-warn.png?d=2026-08-10",
-  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-10",
-  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-10",
-  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-10",
-  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-10",
-  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-10",
-  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-10",
-  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-10",
-  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1.png?d=2026-08-10"
+  "sig-sub-surge": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-sub-surge.png?d=2026-08-11",
+  "sig-exit-sell": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-exit-sell.png?d=2026-08-11",
+  "sig-surge-warn": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-surge-warn.png?d=2026-08-11",
+  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-11",
+  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-11",
+  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-11",
+  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-11",
+  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-11",
+  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-11",
+  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-11",
+  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1.png?d=2026-08-11"
  },
  "ratios": {
   "sig-sub-surge": "1020:1024",
-  "sig-dual-buy": "1024:555",
-  "sig-exit-sell": "1020:1024",
+  "sig-exit-sell": "1024:933",
   "sig-surge-warn": "987:1024",
   "v2-ov-1": "1024:643",
   "v2-ov-6": "1020:1024",
@@ -27,9 +25,9 @@
   "flows-foreign-1": "861:1024",
   "flows-trust-1": "861:1024",
   "pm-aetf-5": "1024:539",
-  "pm-summary-1": "1040:4982"
+  "pm-summary-1": "1040:4508"
  },
  "previews": {
-  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1-preview.png?d=2026-08-10"
+  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1-preview.png?d=2026-08-11"
  }
 }
