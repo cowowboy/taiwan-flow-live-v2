@@ -1219,12 +1219,43 @@ const OV_RRG_TMIN=545, OV_RRG_TMAX=810;              // base 時點範圍 09:05�
 const OV_RRG_TOPN=10, OV_RRG_KEEPN=15;               // 錨點＝成交額 Top10；保留（不淡化）門檻 Top15
 const OV_RRG_Z=2.0, OV_RRG_DPP=0.02;                 // 位移異常：z≥2.0 且 Δshare≥0.02 個百分點
 const OV_RRG_TINY=30;                                // 當日成交額 <30 億 標「極小量」灰字（不剔除）
-// 候補清單**刻意不設上限**：畫布的 OV_RRG_IMPMAX 之所以「不損失發現力」，唯一的理由就是
-// 超出者仍完整列在側欄（規格 §2「改善象限標籤」）。側欄一旦也截斷，那個論據就跳票。
+// 候補清單**刻意不設上限**：畫布的 OV_RRG_IMPMAX／OV_RRG_ODDMAX 之所以「不損失發現力」，
+// 唯一的理由就是超出者仍完整列在側欄（規格 §2「改善象限標籤」「位移異常標籤」）。
+// 側欄一旦截斷、或某類強制族群根本沒有對應的側欄頁，那個論據就跳票。
 // 列數天然有界（＝rrg_base.json 的產業鏈數，目前 47 條），.ovrrglist 可捲動，無爆量風險。
 const OV_RRG_IMPMAX=12;                              // 改善象限強制標示上限（超出者退回一般保留族群；側欄仍列全部）
+// 位移異常強制標示上限。位移異常是本視角唯一「畫布外小族群也可能冒出來」的加值訊號，
+// 只給尾巴不給標籤等於藏起來（頁尾文案也明寫它與 Top15 並列為保留族群），故比照改善象限納入強制標示。
+// 上限 8 的依據（2026-08-10 全日 22 個時點實測，且已先套用 OV_RRG_CLOSE 的收盤窗排除）：
+//   每時點位移異常條數 0~4（全日 17 條、平均 0.77 條/時點），上限 8 留 2 倍餘裕；
+//   刻意**低於** OV_RRG_IMPMAX=12——改善象限是規格 §2 指定的主要發現管道，兩者同時暴增時改善象限優先；
+//   最壞情況強制標籤總數上界 = 10(錨點)+12(改善)+8(位移異常)=30，仍遠低於 47 條全標。
+// 超出上限者退回「其他保留族群」（盡力標，位置不足退 hover），但**一定查得到**：
+// 側欄第三頁「位移異常」不分象限、不設上限列出全部（見 ovRrgSideHtml）。
+// 這條是本上限成立的前提——前兩頁只涵蓋改善／領先象限，落在落後／轉弱象限又超出上限者
+// 在舊版是畫布與側欄雙盲。壓測（**組態 A**：本版邏輯但 ODDMAX=1、停用收盤窗、13:30）：
+// 23 條位移異常有 **5 條**無標籤且側欄查不到。
+// ⚠ 別和**組態 B**（修正前 HEAD 版：位移異常完全不強制標示、無收盤窗）混用——同樣 13:30、
+//   同樣 23 條，組態 B 是 **6 條**無標籤（其中 4 條在 Top15 外）。6 只屬於組態 B，
+//   出現在 ovRrgHtml 標籤段註解與規格 §2；5 只屬於組態 A。
+const OV_RRG_ODDMAX=8;
+// 收盤量能集中窗（台北分鐘；790=13:10）：此時點起不再標示「位移異常」。
+// 依據（2026-08-10 實測，見 docs/rrg-spec-20260809.md §2）：全市場成交額的每 10 分增額在
+// 11:20–13:00 穩定落在 113~139 億，13:10/13:20/13:30 分別跳到 209/258/486 億
+// （百分比基準＝13:00 那一格的 128 億，故為 +63%/+102%/+281%）；
+// 位移異常條數同步由 ≤4 跳到 12/13/23（全日 65 條中 48 條、74% 集中在這三格），
+// 且這 48 條中 **47 條**落在落後／轉弱象限——那是「量能集中到權值股 → 其餘族群佔比機械性下滑」的
+// 分母效應，不是資金輪動。（唯一例外是 13:10 的「金融」落在改善象限：z=5.3、成交額 rank 28、
+// 佔比 1.87%；比例仍是 47/48，不影響停用的結論。）
+// z 是各族群對自身近 6 筆位移標準化，全市場同時受衝擊時 z 對誰都會爆，
+// 拉高 OV_RRG_Z 分不開真假訊號（該窗內 z 實測 2.2~32.4），故直接停用而非調門檻。
+// 台股收盤集合競價名目上是 13:25–13:30，但尾盤量能集中實測從 13:00→13:10 那一格就開始，
+// 故門檻取 13:10 而非 13:25。停用期間頁尾會據實說明並列出「若不停用會有幾條」。
+const OV_RRG_CLOSE=790;
 const OV_RRG_RETRY=2, OV_RRG_RETRY_MS=15000;         // fetch 失敗的時點允許重試次數／重試冷卻（見 ovRrgEnsure）
 const OV_RRG_BASE_STALE=3;                           // base 最後一天距今超過幾個交易日就示警
+// 生效時刻文案（ovRrgHtml 的降級路徑與側欄空清單共用，故放模組層；算法見 ovRrgHtml 降級②的註解）
+const RRG_T0="約 10:00 後", RRG_TODD="約 10:40 後";
 
 // ---- 基準表（data/rrg_base.json）：比照 classify.json 的同源相對路徑載入 ----
 // 檔案可能尚未產出（builder 另案），失敗時整頁不受影響，只有本視角顯示降級文案。
@@ -1404,35 +1435,69 @@ function ovRrgCompute(T){
     const z=lp?ovRrgZ(dser.slice(-OV_RRG_WIN),cur):0;    // 分母分布＝最近 WIN 筆同一個量
     const dpp=Math.abs(last.sh-last.shl)*100;            // Δshare 同為 30 分窗（shl 即 t−30 分）
     const quad=ovRrgQuad(last.x,last.y);
+    // oddRaw＝原始判定；odd＝實際採用。收盤量能集中窗（OV_RRG_CLOSE 起）內一律不採用：
+    // 該窗的位移是全市場分母跳動造成的機械結果，不是輪動（依據見 OV_RRG_CLOSE 宣告處）。
+    // 兩者都保留：頁尾要據實揭露「本時點若不停用會有幾條」，否則使用者只會看到訊號憑空消失。
+    const oddRaw=(z>=OV_RRG_Z&&dpp>=OV_RRG_DPP), closeWin=last.m>=OV_RRG_CLOSE;
     rows.push({name,pts,x:last.x,y:last.y,amtYi,share:last.sh*100,quad,z,dpp,move30:cur,ndisp:dser.length,
-      odd:(z>=OV_RRG_Z&&dpp>=OV_RRG_DPP), tiny:amtYi<OV_RRG_TINY});
+      oddRaw,closeWin,odd:(oddRaw&&!closeWin), tiny:amtYi<OV_RRG_TINY});
   }
   rows.sort((a,b)=>b.amtYi-a.amtYi);
   rows.forEach((r,i)=>{r.rank=i+1;});
   return {rows,valid};
 }
-// 候補清單側欄：兩頁（改善象限＝資金剛輪入／領先象限＝動能領先），各按近 30 分位移排序。
+// 候補清單側欄：三頁——改善象限（資金剛輪入）／領先象限（動能領先）／位移異常。
 // 從**全部**產業鏈撈（不受畫布 Top N 限制）——畫布外的小族群是主要發現管道。
-// **兩頁一律列出該象限全部族群，不截斷**（理由見 OV_RRG_IMPMAX 上方；兩頁同規則，
+// **三頁一律列出全部符合者，不截斷**（理由見 OV_RRG_IMPMAX 上方；三頁同規則，
 // 免得使用者要記「這頁全、那頁截」）。
+//
+// 【第三頁「位移異常」為什麼非有不可】前兩頁是**象限**清單，只涵蓋改善與領先；
+// 位移異常不分象限，2026-08-10 實測多數落在落後／轉弱。畫布對它設了 OV_RRG_ODDMAX 上限，
+// 若側欄沒有對應頁，超出上限且落在落後／轉弱象限者就**畫布與側欄雙盲**——
+// 這正是 OV_RRG_IMPMAX 上方那段「畫布設上限不損失發現力，前提是側欄完整列出」自己立下的前提。
+// （壓測**組態 A**＝本版邏輯但 ODDMAX=1、停用收盤窗、13:30：23 條位移異常有 5 條無標籤，
+//   ＝建材營造 z29.2／能源元件 z13.4／LED照明產業 z8.0／人工智慧 z7.5／休閒娛樂 z7.5，全在落後象限。
+//   ⚠ 這個 5 不要和**組態 B**（修正前 HEAD 版：位移異常完全不強制標示）同時點的 6 條混用，
+//     組態 B 的 6 條見 ovRrgHtml 標籤段註解與規格 §2。）
+// 故本頁列出**全部** r.odd 為真者（不分象限、不設上限），按 z 遞減排序。
+// 收盤量能集中窗內 r.odd 一律為 false，本頁自然為空；空清單文案要據實說明是「停止判定」
+// 而非「沒有」，否則會與頁尾的 closeNote 互相矛盾（closeWin 的判定與頁尾同用 rows.some）。
 function ovRrgSideHtml(rows,picks){
-  const st=state.sub.ov, tab=st.rrgTab==="lead"?"lead":"in";
-  const want=tab==="lead"?"領先":"改善";
-  const list=rows.filter(r=>r.quad===want).sort((a,b)=>b.move30-a.move30);
+  const st=state.sub.ov, tab=(st.rrgTab==="lead"||st.rrgTab==="odd")?st.rrgTab:"in";
+  const want=tab==="lead"?"領先":tab==="in"?"改善":null;
+  const closeWin=rows.some(r=>r.closeWin);   // 與頁尾 closeNote 同一判定，避免兩處說法不一
+  const list=tab==="odd"
+    ? rows.filter(r=>r.odd).sort((a,b)=>b.z-a.z)
+    : rows.filter(r=>r.quad===want).sort((a,b)=>b.move30-a.move30);
   const tabs=`<div class="ovrrgtabs">`+
     `<button class="seg2 ${tab==="in"?"on":""}" data-ovrrg-tab="in">資金剛輪入</button>`+
     `<button class="seg2 ${tab==="lead"?"on":""}" data-ovrrg-tab="lead">動能領先</button>`+
+    `<button class="seg2 ${tab==="odd"?"on":""}" data-ovrrg-tab="odd">位移異常</button>`+
     (picks.size?`<button class="seg2" data-ovrrg-clear>清除選取(${picks.size})</button>`:"")+`</div>`;
+  // 空清單提示三頁各自合理：象限頁說「沒有落在該象限的」；位移異常頁要分「停止判定」與「真的沒有」
+  const empty=tab!=="odd"
+    ? `此時段沒有落在「${want}」象限的產業鏈。`
+    : (closeWin
+        ? `${escI(ovMin2Hm(OV_RRG_CLOSE))} 起為收盤量能集中時段，一律<b>停止判定</b>位移異常（非資料缺失，理由見圖下說明），故本頁為空；象限位置與軌跡照常顯示。`
+        : `此時點沒有位移異常的產業鏈（需 z≥${OV_RRG_Z} 且 Δ佔比≥${OV_RRG_DPP}pp，${RRG_TODD}才可能出現）。`);
   const items=list.length?list.map(r=>{
     const on=picks.has(r.name);
     return `<div class="ovrrgitem ${on?"on":""}" data-ovrrg-pick="${encodeURIComponent(r.name)}" `+
-      `title="${escI(ovChainDisp(r.name))}｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}">`+
+      `title="${escI(ovChainDisp(r.name))}｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}｜近 ${OV_RRG_LAG} 分位移 z=${r.z.toFixed(1)}">`+
       `<span class="nm">${on?"✓ ":""}${escI(ovChainDisp(r.name))}</span>`+
-      `<span class="mt">${r.share.toFixed(2)}%・${r.quad}${r.tiny?"・極小量":""}</span></div>`;
-  }).join(""):`<div class="ovrrghint">此時段沒有落在「${want}」象限的產業鏈。</div>`;
+      `<span class="mt">${r.share.toFixed(2)}%・${r.quad}${tab==="odd"?`・z${r.z.toFixed(1)}`:""}${r.tiny?"・極小量":""}</span></div>`;
+  }).join(""):`<div class="ovrrghint">${empty}</div>`;
+  const note=tab!=="odd"
+    ? `本頁列出「${want}」象限<b>全部 ${list.length} 條</b>（不截斷，可捲動），排序＝近 ${OV_RRG_LAG} 分位移。`
+    : (closeWin
+        ? `本頁在 ${escI(ovMin2Hm(OV_RRG_CLOSE))} 起的收盤量能集中時段<b>不會有項目</b>——該時段一律停止判定位移異常，與圖上、圖下說明一致（不是被截斷）。`
+        : `本頁<b>不分象限</b>列出本時點被判定為位移異常的<b>全部 ${list.length} 條</b>（不截斷、不設上限，可捲動），排序＝z 遞減；`+
+          `畫布對「錨點與改善象限<b>以外</b>」的位移異常最多額外強制標示 ${OV_RRG_ODDMAX} 條`+
+          `（本身也是錨點或改善象限者照舊有標籤、不占這 ${OV_RRG_ODDMAX} 個名額，故圖上帶標籤的位移異常可能超過 ${OV_RRG_ODDMAX} 條），`+
+          `超出者一律在本頁查得到。`);
   return `<div class="ovrrgside"><div style="font-weight:700;font-size:12px;margin-bottom:4px">候補清單</div>`+
     tabs+`<div class="ovrrglist">${items}</div>`+
-    `<div class="ovrrghint">點一下把該產業鏈加入畫布（顯示標籤與尾巴），再點取消。清單取自全部 ${rows.length} 條產業鏈，不受畫布 Top ${OV_RRG_TOPN} 限制；本頁列出「${want}」象限<b>全部 ${list.length} 條</b>（不截斷，可捲動），排序＝近 ${OV_RRG_LAG} 分位移。</div></div>`;
+    `<div class="ovrrghint">點一下把該產業鏈加入畫布（顯示標籤與尾巴），再點取消。清單取自全部 ${rows.length} 條產業鏈，不受畫布 Top ${OV_RRG_TOPN} 限制；${note}</div></div>`;
 }
 function ovRrgHtml(){
   OV_RRG_DREW=false;      // 只有走到最後真的產出 SVG 才翻 true（見宣告處）
@@ -1448,7 +1513,6 @@ function ovRrgHtml(){
   // m−LAG(30) ≥ TMIN(545) → 最早的座標點是 09:40；三個座標點要錨點推到 10:00，即台北 10:01 起可畫。
   // 位移異常另需 MIN_WIN=4 筆 30 分位移＝7 個座標點（09:40…10:40），故錨點 10:40／台北 10:41 起才可能觸發。
   const anchor=ovRrgAnchorMin();
-  const RRG_T0="約 10:00 後", RRG_TODD="約 10:40 後";
   if(anchor==null)return `<div class="loading">盤前時段：輪動雷達需要盤中累積的分鐘快照（${RRG_T0}生效）。</div>`;
   const T=ovRrgTimes(anchor);
   if(T.samples.length<3)return `<div class="loading">盤中資料累積中：目前僅 ${T.samples.length} 個可用時點（軌跡至少需 3 個，${RRG_T0}生效；「位移異常」需更長的取樣視窗，${RRG_TODD}才會出現）。</div>`;
@@ -1520,56 +1584,86 @@ function ovRrgHtml(){
     return `<circle cx="${r.cx.toFixed(1)}" cy="${r.cy.toFixed(1)}" r="${r.r.toFixed(2)}" fill="${col}" fill-opacity="${op}" `+
       `stroke="${col}" stroke-opacity="${sop}" stroke-width="${r.rank<=OV_RRG_TOPN?1.8:1.1}">`+
       `<title>${escI(ovChainDisp(r.name))}｜佔比 ${r.share.toFixed(2)}%（${r.amtYi.toFixed(0)}億${r.tiny?"・極小量":""}）`+
-      `｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}｜${r.quad}象限${r.odd?"｜位移異常":""}</title></circle>`;
+      `｜RS-Ratio ${r.x.toFixed(1)}｜RS-Mom ${r.y.toFixed(1)}｜${r.quad}象限`+
+      `${r.odd?"｜位移異常":(r.oddRaw?"｜收盤量能集中時段，不判定位移異常":"")}</title></circle>`;
   };
   const bubs=rows.filter(r=>!r.show).map(bubble).join("")+rows.filter(r=>r.show).map(bubble).join("");
-  // 標籤：只給顯示族群。**強制標示族群＝錨點（Top10）＋改善象限**（規格 §2「改善象限標籤」、
-  // §4 完成定義 2 兩者並列；改善象限正是本視角比排行榜多給的資訊，退回 hover 等於藏起來）。
-  // 上限 OV_RRG_IMPMAX：改善象限實測 8 條左右，但劇烈輪動時可能暴增而糊掉整張圖，
-  // 故超過上限時只強制標示「近 30 分位移」最大的前 N 條——側欄「資金剛輪入」本來就列全部，
-  // 超出者只是從畫布移到側欄，不損失發現力。
-  // 強制族群排最前面優先佔位，擁擠時被犧牲的是「其他保留族群」（Top15 內的非錨點、位移異常、手動加入）。
+  // 標籤：只給顯示族群。**強制標示族群＝錨點（Top10）＋改善象限＋位移異常**——
+  // 規格 §2「顯示規則」把「Top15／改善象限／位移異常」三者並列為保留族群，頁尾文案也照抄，
+  // 但位移異常原本不在強制名單裡，8 個候選位一撞光就靜默退成「只有尾巴沒有標籤」，
+  // 犧牲掉的正是本視角唯一「畫布外小族群也會冒出來」的加值訊號
+  // （**組態 B**＝修正前 HEAD 版、位移異常完全不強制標示：2026-08-10 13:30 實測 6 條被犧牲，4 條在 Top15 外。
+  //   此處的 6 屬於組態 B；OV_RRG_ODDMAX 宣告處另有「組態 A、ODDMAX=1」的 5 條，兩者勿混用）。
+  // 兩者都設上限（OV_RRG_IMPMAX / OV_RRG_ODDMAX，理由見宣告處），超出者退回「其他保留族群」。
+  // order 的次序即佔位優先序：錨點 → 改善象限 → 位移異常 → 其他保留族群，
+  // 擁擠時被犧牲的一律是後面的（Top15 內的非錨點、手動加入、超出上限者）。
   const impAll=rows.filter(r=>r.quad==="改善").sort((a,b)=>b.move30-a.move30);   // 與側欄同一排序
   const impSet=new Set(impAll.slice(0,OV_RRG_IMPMAX).map(r=>r.name));
-  const forced=r=>r.rank<=OV_RRG_TOPN||impSet.has(r.name);
+  // 位移異常：只收「還沒被錨點／改善象限涵蓋」的，按 z 遞減取前 OV_RRG_ODDMAX 條
+  // （上限算在「額外新增的強制標籤」上，否則錨點剛好也異常時會白白吃掉名額）。
+  const oddAll=rows.filter(r=>r.odd&&r.rank>OV_RRG_TOPN&&!impSet.has(r.name)).sort((a,b)=>b.z-a.z);
+  const oddSet=new Set(oddAll.slice(0,OV_RRG_ODDMAX).map(r=>r.name));
+  const forced=r=>r.rank<=OV_RRG_TOPN||impSet.has(r.name)||oddSet.has(r.name);
   const placed=[], order=[...anchors,
     ...impAll.filter(r=>r.show&&r.rank>OV_RRG_TOPN&&impSet.has(r.name)),         // 上限內的改善象限（已按位移排序）
-    ...rows.filter(r=>r.show&&r.rank>OV_RRG_TOPN&&!impSet.has(r.name))];         // 其他保留族群（含超出上限的改善象限）
+    ...oddAll.filter(r=>oddSet.has(r.name)),                                     // 上限內的位移異常（已按 z 排序）
+    ...rows.filter(r=>r.show&&r.rank>OV_RRG_TOPN&&!impSet.has(r.name)&&!oddSet.has(r.name))];  // 其他保留族群
+  // 兩個框的重疊面積（0＝不重疊）。fallback 要「挑重疊最少的位置」而不是無條件疊，故需要面積不是布林。
+  const ovlp=(a,b)=>Math.max(0,Math.min(a.x2,b.x2)-Math.max(a.x1,b.x1))*Math.max(0,Math.min(a.y2,b.y2)-Math.max(a.y1,b.y1));
   const lbls=order.map(r=>{
     const txt=`${ovChainDisp(r.name)} ${r.share.toFixed(1)}%`, tail=r.tiny?"·極小量":"";
     const wpx=[...(txt+tail)].reduce((a,ch)=>a+(ch.charCodeAt(0)>255?12.5:7),0)+4;
+    const wt=1+r.share;   // 佔位權重＝成交佔比。疊放不可避免時，優先蓋掉小族群的標籤而非龍頭的
     const mk=(x,y,anc)=>`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anc}" font-size="12.5" font-weight="700" fill="var(--fg)" pointer-events="none">`+
       `${escI(txt)}${tail?`<tspan fill="var(--muted)">${tail}</tspan>`:""}</text>`;
-    // [dx,dy,anchor]：dx 為文字錨點相對泡泡中心的位移
-    const cands=[[0,-r.r-5,"middle"],[0,r.r+15,"middle"],[r.r+5,4,"start"],[-r.r-5,4,"end"],
-                 [r.r+4,-r.r-2,"start"],[-r.r-4,-r.r-2,"end"],[r.r+4,r.r+12,"start"],[-r.r-4,r.r+12,"end"]];
-    let first=null;
+    // 候選位一圈 8 個 [dx,dy,anchor]（dx 為文字錨點相對泡泡中心的位移），gap＝標籤離泡泡邊緣的間距。
+    // ring(5) 這 8 個候選位與舊版（外圈與加權 fallback 之前）的候選位陣列**逐一等值**。
+    // 但這只保證「第一圈候選位相同」，**不等於整張圖輸出相同**：只要有任何強制族群在第一圈撞光，
+    // 舊版就直接進 fallback 疊放、新版改跳外圈（14/24/34），該標籤落點一分岔，
+    // 它寫進 placed 的框就不同，後面每一個標籤的碰撞判定跟著連鎖改變。
+    // 故「輸出與修正前完全相同」只在**沒有任何強制族群走出第一圈**（更不用說走到 fallback）時成立——
+    // 2026-08-10 以本演算法差異單獨比對，22 個時點中只有 5 個（10:00/11:20/12:30/12:40/13:10）如此。
+    const ring=g=>[[0,-r.r-g,"middle"],[0,r.r+g+10,"middle"],[r.r+g,4,"start"],[-r.r-g,4,"end"],
+                   [r.r+g-1,-r.r-g+3,"start"],[-r.r-g+1,-r.r-g+3,"end"],[r.r+g-1,r.r+g+7,"start"],[-r.r-g+1,r.r+g+7,"end"]];
+    // 外三圈（gap 14/24/34）只給強制族群：一般保留族群若把標籤甩到離泡泡十幾 px 外，容易被讀成隔壁泡泡的標籤，
+    // 寧可退回 hover；強制族群則是「一定要有標籤」，寧可遠一點也不要疊上去。
+    const cands=forced(r)?[...ring(5),...ring(14),...ring(24),...ring(34)]:ring(5);
+    let best=null;
     for(const [dx,dy,anc] of cands){
       const lx=r.cx+dx, ly=r.cy+dy;
       const x1=anc==="middle"?lx-wpx/2:anc==="start"?lx:lx-wpx;
       const box={x1,x2:x1+wpx,y1:ly-12,y2:ly+3};
       if(box.x1<mL||box.x2>mL+pw||box.y1<mT||box.y2>mT+ph)continue;
-      if(first===null)first={box,lx,ly,anc};
-      if(placed.some(b=>!(box.x2<b.x1||box.x1>b.x2||box.y2<b.y1||box.y1>b.y2)))continue;
-      placed.push(box);
-      return mk(lx,ly,anc);
+      const cost=placed.reduce((s,b)=>s+ovlp(box,b)*b.wt,0);
+      if(cost===0){ box.wt=wt; placed.push(box); return mk(lx,ly,anc); }
+      if(!best||cost<best.cost)best={box,lx,ly,anc,cost};   // 全撞時的備胎：加權重疊最小者
     }
     if(forced(r)){
-      // first===null＝8 個候選全部出界（泡泡貼邊＋標籤過寬）。此時夾回畫布內，
-      // 確保「強制族群永遠有標籤」在極端情況也成立（不因出界而靜默消失）。
-      let f=first;
+      // 走到這裡＝32 個候選位沒有一個空著。強制族群不能靜默消失，只能疊——
+      // 但要疊在「加權重疊最小」的位置（best），而不是舊版的第一個合法位置（無條件疊，
+      // 2026-08-10 12:20 因此出現 17 對碰撞，含「水泥 0.1%·極小量」壓在「半導體 42.0%」上）。
+      let f=best;
       if(!f){
+        // best===null＝32 個候選位全部出界（泡泡貼邊＋標籤過寬）。夾回畫布內。
         const [dx,dy]=cands[0];                          // cands[0] 是正上方、text-anchor=middle
         const ly=cl(r.cy+dy,mT+12,mT+ph-3);
         const x1=Math.max(mL,Math.min(mL+pw-wpx,r.cx+dx-wpx/2));
         f={box:{x1,x2:x1+wpx,y1:ly-12,y2:ly+3},lx:x1+wpx/2,ly,anc:"middle"};
       }
-      placed.push(f.box); return mk(f.lx,f.ly,f.anc);
+      f.box.wt=wt; placed.push(f.box); return mk(f.lx,f.ly,f.anc);
     }
     return "";
   }).join("");
 
   const nOdd=rows.filter(r=>r.odd).length, nShow=rows.filter(r=>r.show).length;
+  // 收盤量能集中窗：時點屬性（全體同值，用 some 以防個別鏈在最新時點缺 base 而 last.m 較早）。
+  // 停用位移異常時**必須據實揭露條數**，否則使用者只會看到訊號在 13:10 憑空消失而不知原因。
+  const closeWin=rows.some(r=>r.closeWin);
+  const nOddRaw=rows.filter(r=>r.oddRaw).length;
+  const nOddRawDn=rows.filter(r=>r.oddRaw&&(r.quad==="落後"||r.quad==="轉弱")).length;
+  const closeNote=closeWin
+    ? `<div class="ovrrghint" style="color:var(--muted)">${escI(ovMin2Hm(OV_RRG_CLOSE))} 起為<b>收盤量能集中時段</b>（尾盤與 13:25–13:30 收盤集合競價）：量能集中到權值股會讓其餘族群的成交佔比機械性下滑，那是分母效應不是資金輪動，故本時段<b>停止標示「位移異常」</b>（非資料缺失）。本時點若不停用會有 ${nOddRaw} 條，其中 ${nOddRawDn} 條落在落後／轉弱象限。象限位置與軌跡不受影響，照常顯示。</div>`
+    : "";
   // 回放模式：本視角的錨點取自 ovRrgAnchorMin()（即時），不跟隨回放滑桿。同一畫面其他區塊是歷史時點，
   // 若不標示會被誤讀成「回放時點的輪動」。跟隨回放留作後續增強（風險與範圍過大），此處先據實揭露。
   const replayNote=OV_REPLAY
@@ -1589,11 +1683,16 @@ function ovRrgHtml(){
     `x＝RS-Ratio：100 表示該鏈成交佔比與${baseTxt}同時點的常態相同；y＝RS-Mom：100 表示近 ${OV_RRG_LAG} 分鐘相對強弱沒有變化。`+
     `錨點取成交額前 ${OV_RRG_TOPN} 大（共 ${rows.length} 條全數在圖上）；${impAll.length>OV_RRG_IMPMAX
       ? `錨點一律標名，改善象限本時點 ${impAll.length} 條、圖上標示近 ${OV_RRG_LAG} 分位移最大的 ${OV_RRG_IMPMAX} 條（其餘 ${impAll.length-OV_RRG_IMPMAX} 條見右側「資金剛輪入」清單，該清單完整列出全部 ${impAll.length} 條）`
-      : `錨點與改善象限（本時點 ${impAll.length} 條）一律標名`}，前 ${OV_RRG_KEEPN} 大或位移異常（z≥${OV_RRG_Z}且Δ佔比≥${OV_RRG_DPP}pp，本時點 ${nOdd} 條；位移異常${RRG_TODD}才可能出現）者保留標籤與尾巴，`+
+      : `錨點與改善象限（本時點 ${impAll.length} 條）一律標名`}；${closeWin
+      ? `位移異常本時點停止標示（收盤量能集中時段，說明見上方灰字；右側「位移異常」清單同步為空）`
+      : `位移異常（z≥${OV_RRG_Z}且Δ佔比≥${OV_RRG_DPP}pp，本時點 ${nOdd} 條${oddAll.length>OV_RRG_ODDMAX
+          ? `，錨點與改善象限以外者圖上強制標示 z 最大的 ${OV_RRG_ODDMAX} 條，其餘 ${oddAll.length-OV_RRG_ODDMAX} 條見右側「位移異常」清單`
+          : ""}）亦一律標名（${RRG_TODD}才可能出現，${escI(ovMin2Hm(OV_RRG_CLOSE))} 起停止標示）；右側「位移異常」清單不分象限完整列出全部 ${nOdd} 條`}。`+
+    `前 ${OV_RRG_KEEPN} 大的非錨點與手動加入者保留尾巴、盡量標名（位置不足時退為滑過可見），`+
     `目前顯示 ${nShow} 條，其餘淡化不標名（滑過可看）。當日成交額 <${OV_RRG_TINY} 億標「極小量」但不剔除——小分母會放大比值，該類位置僅供參考。`+
     `本圖只描述當下相對${baseTxt}常態的位置與 ${OV_RRG_LAG} 分鐘內的變化，象限位置不等於買賣建議，也不含預測意涵；基準僅取 ${bd?bd.n:5} 個交易日、盤中快照為分鐘級近似。雙指縮放／滾輪放大、拖曳平移、雙擊還原。</div>`;
   OV_RRG_DREW=true;
-  return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+foot;
+  return `<div class="ovrrgwrap">${chart}${ovRrgSideHtml(rows,picks)}</div>`+baseWarn+closeNote+foot;
 }
 // 候補清單互動：切分頁／加入或移出畫布／清除選取
 document.addEventListener("click",e=>{
