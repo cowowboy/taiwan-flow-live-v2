@@ -762,8 +762,16 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
   fetch 該班線上產物 raw JSON、檢查日期欄是否今日，非今日就 workflow_dispatch 補發。
   - **覆蓋 6 條班（檢查點台北時間）**：daysummary 14:25、aetf 18:50、baseline 21:10（本 repo）；
     us 05:30（本 repo，美股班）；diag 22:35、mktbal 22:45（**跨 repo → postmkt**）。
-  - **機制**：①產物新鮮度（不需 GH token，直接量資料有沒有更新；us 因 date 欄是美股交易日會落後，
-    改判 `generated_at` 是否今天跑過）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
+  - **機制**：①產物新鮮度（不需 GH token，直接量資料有沒有更新；us 原判 `generated_at` 是否
+    今天跑過（genToday），**2026-08-13 改為資料日判準**（mode `usDate`）：`date` ≥ 最近預期
+    美股交易日（`lastExpectedUsTradingDate`，台北二~六＝昨日、日/一＝上週五）——genToday 被
+    us.yml 每輪重寫的 generated_at 污染，空轉也算新鮮、recheck/健檢永遠不補發不告警。同批修法：
+    us.yml push_now rebase 衝突自我恢復（abort→reset→重套產物）＋只在內容有變（排除
+    generated_at）才 commit＋`inputs.rounds`；build_us.py 內容未變保留原 generated_at；
+    新增 us 晨間補跑班 `runUsCatchup`（掛 summary-am crons，台北 07:00-08:05，dispatch
+    rounds=2、KV 20 分桶 dedup）——FinMind 美股常態 07:30-08:30 才入庫，05:05 主班 12 輪
+    ×10 分在 06:59 耗盡搆不到入庫窗；AM 美股速覽卡改 per-card gate（us date 達預期才進
+    payload）。測試 test/uscatchup.mjs）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
     失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 runBackup 內台北 dow 守週末——us 班跨台北日界，dow 無法直接表達，cron 改用 dow *；
     CF cron dow 為 Quartz 慣例 1-7＝日~六，平日應寫 2-6，見上方「CF cron dow 慣例錯誤」段）
     ④`GH_DISPATCH_TOKEN` 未設整段靜默。程式：`worker/src/index.js` `backupPipelines`/`BACKUP_CRONS`/

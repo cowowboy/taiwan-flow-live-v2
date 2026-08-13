@@ -20,7 +20,9 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
     byName.daysummary.url.endsWith("/daysummary/latest.json") && byName.daysummary.repo === "taiwan-flow-live-v2");
   chk("aetf 用 run_date 欄", byName.aetf.field === "run_date" && byName.aetf.wf === "aetf.yml");
   chk("baseline 用 date 欄", byName.baseline.field === "date" && byName.baseline.url.endsWith("/baseline.json"));
-  chk("us genToday＋非TW守門", byName.us.mode === "genToday" && byName.us.field === "generated_at" && byName.us.tw === false);
+  // 2026-08-13：us 由 genToday 改 usDate——genToday 被 us.yml 每輪重寫的 generated_at 污染，
+  // recheck 永遠判新鮮不補發；改判「資料日 ≥ 最近預期美股交易日」
+  chk("us usDate＋date 欄＋非TW守門", byName.us.mode === "usDate" && byName.us.field === "date" && byName.us.tw === false);
   chk("intraday {date} 佔位＋tw 守門", byName.intraday.url.endsWith("/intraday/{date}.json") &&
     byName.intraday.wf === "intraday.yml" && byName.intraday.tw === true);
   chk("diag 跨 repo postmkt＋dep=postmkt.json", byName.diag.repo === "postmkt" && byName.diag.wf === "diag.yml" &&
@@ -77,14 +79,32 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
   chk("latest_date 欄=今日 → fresh", productFresh({ latest_date: "2026-07-20" }, byName.mktbal, today) === true);
   chk("obj null → 非fresh", productFresh(null, byName.baseline, today) === false);
   chk("欄位缺 → 非fresh", productFresh({}, byName.baseline, today) === false);
-  // genToday：us generated_at 帶 +08:00，取台北日比對
+  // genToday（news 等用；us 已於 2026-08-13 改 usDate）：generated_at 帶 +08:00，取台北日比對
+  const genPipe = { mode: "genToday", field: "generated_at" };
   chk("genToday generated_at=今日(+08:00) → fresh",
-    productFresh({ generated_at: "2026-07-20T05:49:58.483735+08:00", date: "2026-07-17" }, byName.us, today) === true);
+    productFresh({ generated_at: "2026-07-20T05:49:58.483735+08:00", date: "2026-07-17" }, genPipe, today) === true);
   chk("genToday generated_at=昨日 → 非fresh",
-    productFresh({ generated_at: "2026-07-19T05:49:58+08:00", date: "2026-07-17" }, byName.us, today) === false);
+    productFresh({ generated_at: "2026-07-19T05:49:58+08:00", date: "2026-07-17" }, genPipe, today) === false);
   chk("genToday 跨日 UTC 正規化（07-19T23:30Z=台北07-20 07:30）→ fresh",
-    productFresh({ generated_at: "2026-07-19T23:30:00Z" }, byName.us, today) === true);
-  chk("genToday generated_at 缺 → 非fresh", productFresh({ date: "2026-07-20" }, byName.us, today) === false);
+    productFresh({ generated_at: "2026-07-19T23:30:00Z" }, genPipe, today) === true);
+  chk("genToday generated_at 缺 → 非fresh", productFresh({ date: "2026-07-20" }, genPipe, today) === false);
+  // usDate（2026-08-13）：資料日判準——date ≥ 最近預期美股交易日。generated_at 完全不看
+  // （us.yml 每輪重寫它，靠它判會被污染成永遠新鮮）。today=2026-07-20 週一 → 預期=上週五 07-17
+  chk("usDate 週一 date=上週五 → fresh（generated_at 舊也無妨）",
+    productFresh({ date: "2026-07-17", generated_at: "2026-07-18T05:00:00+08:00" }, byName.us, today) === true);
+  chk("usDate 週一 date=上週四 → 非fresh（generated_at 今日也救不了）",
+    productFresh({ date: "2026-07-16", generated_at: "2026-07-20T05:49:58+08:00" }, byName.us, today) === false);
+  chk("usDate 週二 date=昨日 → fresh",
+    productFresh({ date: "2026-07-20" }, byName.us, "2026-07-21") === true);
+  chk("usDate 週二 date=上週五 → 非fresh",
+    productFresh({ date: "2026-07-17" }, byName.us, "2026-07-21") === false);
+  chk("usDate 週六 date=週五 → fresh", productFresh({ date: "2026-07-24" }, byName.us, "2026-07-25") === true);
+  chk("usDate 週日 date=週五 → fresh", productFresh({ date: "2026-07-24" }, byName.us, "2026-07-26") === true);
+  chk("usDate date 缺 → 非fresh", productFresh({ generated_at: "2026-07-20T05:00:00+08:00" }, byName.us, today) === false);
+  // 美國國定假日（設計已知誤差）：假日次晨 date 停在前一交易日 → 誤判 stale（觸發補跑/告警
+  // 但拿不到新資料、無害）。例：07-03(五) 美國獨立日補假休市，台北週六 07-04 預期=07-03
+  chk("usDate 美國假日次晨 → 誤判非fresh（已知可接受）",
+    productFresh({ date: "2026-07-02" }, byName.us, "2026-07-04") === false);
 }
 
 // ---- runBackup：整合決策（mock env / mock fetch，不打真實網路）----
@@ -156,13 +176,14 @@ const NOW = Date.UTC(2026, 6, 20, 12, 0, 0);   // 固定時鐘（opts.nowMs 注�
   chk("diag 跨 repo 補發打 postmkt/diag.yml",
     out.fired === true && spy[0].includes("/shihpc/postmkt/actions/workflows/diag.yml/dispatches"), spy[0]);
 }
-// 6) us（tw:false）：不看 series；generated_at 昨日 → 補發（即使無 series 也不被守門擋）
+// 6) us（tw:false）：不看 series；資料日未達預期（週一預期=上週五 07-17、產物停在 07-16）
+//    → 補發（即使無 series 也不被守門擋）。generated_at 今日也救不了——usDate 只看資料日
 {
   const spy = [];
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: fakeKV() }, TP, byName.us,
-    mkFetch({ generated_at: "2026-07-19T05:49:58+08:00", date: "2026-07-17" }, 204, spy));
+    mkFetch({ generated_at: "2026-07-20T05:49:58+08:00", date: "2026-07-16" }, 204, spy));
   chk("us 無 series 仍不被守門擋（tw:false）", out.fired === true);
-  chk("us 補發打 us.yml", spy[0].includes("/us.yml/dispatches"), spy[0]);
+  chk("us 補發打 us.yml", spy.length === 1 && spy[0].includes("/us.yml/dispatches"), spy[0]);
 }
 // 6a2) us 週末守門：台北 dow=6（週六晨）→ 不補發（cron dow * 由 runBackup 台北 dow 擋週末）
 {
@@ -172,12 +193,22 @@ const NOW = Date.UTC(2026, 6, 20, 12, 0, 0);   // 固定時鐘（opts.nowMs 注�
   chk("us 週末（台北 dow6）→ skipped non-trading-day", out.skipped === "non-trading-day");
   chk("us 週末 → 不打 dispatch", spy.length === 0);
 }
-// 6b) us generated_at 今日 → fresh
+// 6b) us 資料日已達預期（週一預期=上週五 07-17）→ fresh（即使 generated_at 是舊的）
 {
   const spy = [];
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: fakeKV() }, TP, byName.us,
-    mkFetch({ generated_at: "2026-07-20T05:49:58+08:00", date: "2026-07-17" }, 204, spy));
-  chk("us 今天已跑 → fresh:true", out.fresh === true && spy.length === 0);
+    mkFetch({ generated_at: "2026-07-18T07:49:58+08:00", date: "2026-07-17" }, 204, spy));
+  chk("us 資料日達預期 → fresh:true", out.fresh === true && spy.length === 0);
+}
+// 6c) us recheck 情境（本次修法核心）：05:05 首發後 us.yml 空轉（generated_at 已是今日、
+//     date 沒推進）→ 05:35 recheck 仍判 stale、補發第 2 次（舊 genToday 判準在此永遠短路）
+{
+  const spy = [];
+  const kv = fakeKV({ "bkfired:20260720:us": bkStateValue("fired", 1, NOW - 30 * 60e3) });
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, byName.us,
+    mkFetch({ generated_at: "2026-07-20T05:10:00+08:00", date: "2026-07-16" }, 204, spy), { nowMs: NOW });
+  chk("us recheck：generated_at 今日但 date 未達預期 → 補發第 2 次",
+    out.fired === true && out.attempt === 2, JSON.stringify(out));
 }
 // 7) dry 模式：非今日但只回決策、不真的 dispatch、KV 不記
 {

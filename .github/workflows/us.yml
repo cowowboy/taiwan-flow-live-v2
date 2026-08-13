@@ -1,11 +1,18 @@
 name: us
 # 台股開盤前「昨夜美股速覽」：美股收盤(台北凌晨4/5點)後產 data/us.json，目標 08:00 台北前完成。
-# 主觸發＝Worker 05:05 台北（2026-07-22 翻轉；generated_at 非今日即 dispatch，重試最多 2 小時等 FinMind 入庫）。
-# 本 cron 為備援 06:10 台北。
+# 主觸發＝Worker 05:05 台北（2026-07-22 翻轉；資料日非最近預期美股交易日即 dispatch）。
+# 2026-08-13 補上「晨間補跑班」：FinMind 常態 07:30-08:30 才入庫，05:05 主班 12 輪×10 分在
+# 06:59 耗盡搆不到入庫窗——Worker 於台北 07:00-08:05 檢查 us.json 資料日，未達預期即
+# dispatch 本 workflow（inputs.rounds=2 小輪數快跑）。本 cron 為備援 06:10 台北。
 on:
   schedule:
     - cron: '10 22 * * 0-4'   # 週日~四 22:10 UTC = 06:10 台北（備援；主觸發＝Worker 05:05 新鮮度檢查 dispatch，2026-07-22 翻轉。Worker 故障日此班 +延遲仍趕 08:00 前，us 為最緊班、壓線已知）
   workflow_dispatch:
+    inputs:
+      rounds:
+        description: '重試輪數（每輪間隔 10 分鐘；Worker 晨間補跑班以 2 小輪數 dispatch）'
+        required: false
+        default: '12'
 
 permissions:
   contents: write
@@ -25,34 +32,73 @@ jobs:
           python-version: '3.12'
       - run: pip install requests
       # FinMind 美股日線收盤後逐檔滾動入庫（07-07 實測：06:46 全無、07:36 指數/權值先到、~08:25 全齊）。
-      # 策略：每 10 分鐘重跑、內容有變就即刻提交＋部署（分批上站，指數/ADR 先到先見），
+      # 策略：每 10 分鐘重跑、內容有變（排除 generated_at）才提交＋部署（分批上站，指數/ADR 先到先見），
       # 直到日期推進且舊檔 ≤1/3 才算齊；美國休市日（日期不會推進）重試耗盡後結束。
       - name: build us.json（等 FinMind 入庫，分批上站）
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           GH_TOKEN: ${{ github.token }}
+          ROUNDS_INPUT: ${{ github.event.inputs.rounds }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          ROUNDS="${ROUNDS_INPUT:-12}"
+          # 內容比對（排除 generated_at）：HEAD 版與工作區版實質相同回 0（＝無新資料）
+          same_content() {
+            python - <<'PY'
+          import json, subprocess, sys
+          try:
+              old = json.loads(subprocess.run(["git", "show", "HEAD:data/us.json"],
+                                              capture_output=True, text=True, check=True).stdout)
+          except Exception:
+              sys.exit(1)   # HEAD 無此檔／壞檔 → 視為有變
+          try:
+              new = json.load(open("data/us.json"))
+          except Exception:
+              sys.exit(1)
+          strip = lambda d: {k: v for k, v in d.items() if k != "generated_at"}
+          sys.exit(0 if strip(old) == strip(new) else 1)
+          PY
+          }
           push_now() {
+            # 只在「資料內容有變」才 commit：排除 generated_at 比對（build_us.py 內容未變時
+            # 會保留原 generated_at，此處再守一層），沒變就跳過——不再每輪空轉 commit
+            if same_content; then echo "無新資料（排除 generated_at 後內容未變），跳過 commit"; return 0; fi
             git add data/us.json
             if git diff --cached --quiet; then echo "no change"; return 0; fi
             git commit -m "us $(date -u +%FT%TZ)"
             pushed=0
             for k in 1 2 3 4 5; do
-              if git pull --rebase origin main && git push; then pushed=1; break; fi
+              if git pull --rebase origin main; then
+                if git push; then pushed=1; break; fi
+              else
+                # rebase 衝突（晨間 bot commit 多、同檔對撞）→ abort 清理後改走
+                # 「reset 到 origin/main → 重套我方最新產物」自我恢復，不留 unmerged 狀態
+                git rebase --abort || true
+                cp data/us.json /tmp/us.json.mine
+                # fetch 失敗（網路等非衝突原因）→ 這輪放棄，睡 4 秒進下一次 push 重試
+                git fetch origin main || { echo "fetch 失敗，稍後重試"; sleep 4; continue; }
+                git reset --hard origin/main
+                cp /tmp/us.json.mine data/us.json
+                if same_content; then echo "origin 已有相同內容，視為已推"; pushed=1; break; fi
+                git add data/us.json
+                git commit -m "us $(date -u +%FT%TZ)"
+                if git push; then pushed=1; break; fi
+              fi
               sleep 4
             done
-            if [ "$pushed" != "1" ]; then echo "::warning::push failed after 5 retries（下一輪 10 分鐘後會再試）"; return 1; fi
+            # push 最終失敗只記 log 不終止 run（bash -e 下 return 1 會殺整個 step），
+            # 迴圈下一輪（10 分鐘後）重跑 build 再試——與「下一輪會再試」的行為一致
+            if [ "$pushed" != "1" ]; then echo "::warning::push failed after 5 retries（下一輪 10 分鐘後會再試）"; return 0; fi
             # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
             gh workflow run pages.yml --ref main || true
           }
           prev=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')" 2>/dev/null || echo '')
-          for i in $(seq 1 12); do
+          for i in $(seq 1 "$ROUNDS"); do
             python src/build_us.py
             new=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')")
             fresh=$(python -c "import json;d=json.load(open('data/us.json'));rows=[r for g in d['groups'] for r in g['rows']];stale=sum(1 for r in rows if r.get('d') and r['d']<(d.get('date') or ''));print('yes' if rows and stale*3<=len(rows) else 'no')")
             push_now
             if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
-            if [ $i -lt 12 ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/12"; sleep 600; fi
+            if [ $i -lt "$ROUNDS" ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/$ROUNDS"; sleep 600; fi
           done

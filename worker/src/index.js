@@ -839,8 +839,9 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
 const POSTMKT_BASE = "https://raw.githubusercontent.com/shihpc/postmkt/main";
 // 六條每日高價值班設定：
 //   mode "date"     → 產物 field（前 10 碼）=== 今日台北交易日；
-//   mode "genToday" → generated_at 的台北日 === 今日（us 產物 date 欄是美股交易日、天生落後一日，
-//                     改判「今天有沒有跑過」）。
+//   mode "genToday" → generated_at 的台北日 === 今日（判「今天有沒有跑過」；news 等用）；
+//   mode "usDate"   → 產物 date（美股交易日）≥ 最近預期美股交易日（lastExpectedUsTradingDate；
+//                     us 專用，2026-08-13 取代 genToday——舊判準被每輪重寫的 generated_at 污染）。
 //   tw true  → 交易日守門用當日 frame series（假日無 → 不補發）；us 為 false（美股班，cron dow 已守門）。
 // 2026-07-22 翻轉：Worker 從「備援補發」升格「主排程」——CF cron 挪到「上游資料就緒的理想
 // 時點」先跑（GH cron 挪後變兜底備援、一條不刪＝CF 單點故障防線）。機制不變（新鮮度檢查→
@@ -854,7 +855,9 @@ export function backupPipelines(env) {
     { name: "daysummary", repo: "taiwan-flow-live-v2", wf: "daysummary.yml", url: `${V2}/daysummary/latest.json`, field: "date",       mode: "date",     tw: true  },
     { name: "aetf",       repo: "taiwan-flow-live-v2", wf: "aetf.yml",       url: `${V2}/aetf/latest.json`,       field: "run_date",   mode: "date",     tw: true  },
     { name: "baseline",   repo: "taiwan-flow-live-v2", wf: "baseline.yml",   url: `${V2}/baseline.json`,          field: "date",       mode: "date",     tw: true  },
-    { name: "us",         repo: "taiwan-flow-live-v2", wf: "us.yml",         url: `${V2}/us.json`,                field: "generated_at", mode: "genToday", tw: false },
+    // us（2026-08-13 改 usDate）：date 欄=美股交易日，判「≥ 最近預期美股交易日」——
+    // 舊 genToday 被 us.yml 每輪重寫 generated_at 污染，recheck 永遠不補發
+    { name: "us",         repo: "taiwan-flow-live-v2", wf: "us.yml",         url: `${V2}/us.json`,                field: "date",       mode: "usDate",   tw: false },
     // intraday（2026-07-22 納管）：KV frame TTL 僅 2 天，GH 排程漏發/失敗即永久掉回測樣本
     //   （7a 上線後 07-20/07-21 全漏的教訓）。14:40 檢查當日檔存在與否，缺即補發。
     { name: "intraday",   repo: "taiwan-flow-live-v2", wf: "intraday.yml",   url: `${V2}/intraday/{date}.json`,   field: "date",       mode: "date",     tw: true  },
@@ -944,6 +947,14 @@ export function bkGate(st, nowMs, recheckMs = BK_RECHECK_MS, maxN = BK_MAX_ATTEM
   if (nowMs - (st.ts || 0) < recheckMs) return { act: "skip", why: "already-fired", n: st.n };
   return { act: "recheck", n: st.n + 1 };
 }
+// 最近預期美股交易日（台北視角，純函式；復用 /status 的 addDaysISO，函式本身不動）：
+// 台北週二~週六＝台北昨日（美股前夜收盤）；週日＝上週五（-2）；週一＝上週五（-3）。
+// 美國國定假日不處理（簡化）：假日當天會誤判 stale 觸發補跑/告警，補跑拿不到新資料也無害。
+export function lastExpectedUsTradingDate(dateISO) {
+  const dow = new Date(dateISO + "T00:00:00Z").getUTCDay();
+  if (dow >= 2 && dow <= 6) return addDaysISO(dateISO, -1);
+  return addDaysISO(dateISO, dow === 0 ? -2 : -3);   // 週日 -2／週一 -3 → 上週五
+}
 // 產物新鮮度判定（純函式，可離線測）：fresh=true 代表今日已跑、不需補發
 export function productFresh(obj, pipe, today) {
   if (!obj) return false;
@@ -953,6 +964,13 @@ export function productFresh(obj, pipe, today) {
     const t = new Date(g);
     if (isNaN(t.getTime())) return false;
     return taipeiParts(t).date === today;   // generated_at 帶 +08:00，正規化後取台北日
+  }
+  if (pipe.mode === "usDate") {
+    // us（2026-08-13，取代 genToday）：資料日判準——us.json 的 date（美股交易日）已達
+    // 最近預期美股交易日才算新鮮。舊 genToday 只判「今天跑過」，us.yml 每輪重寫
+    // generated_at 導致空轉也算新鮮、recheck/健檢永遠不補發不告警。
+    const d = String(obj[pipe.field] || "").slice(0, 10);
+    return !!d && d >= lastExpectedUsTradingDate(today);
   }
   return String(obj[pipe.field] || "").slice(0, 10) === today;
 }
@@ -1358,6 +1376,48 @@ export async function runMorning(env, tp, fetchFn = fetch, opts = {}) {
   return out;
 }
 
+// ---- us 晨間補跑班（2026-08-13）：FinMind 美股常態台北 07:30-08:30 才入庫，05:05 主班的
+// 12 輪×10 分重試在 06:59 耗盡、永遠搆不到入庫窗（過去靠 GH 備援 cron 的排程延遲「碰巧」
+// 推進 07-08 點窗才拿到資料）。掛在既有 summary-am crons #11（*/5 23）/#12（*/10 0）的
+// scheduled 分派處（比照 runMorning，不加 cron）：台北 07:00-08:05 檢查 us.json 資料日，
+// 未達最近預期美股交易日即 dispatch us.yml（inputs.rounds=2 小輪數快跑）。
+// 08:05 後不再觸發（別跟 08:10 的 AM 圖卡渲染窗搶）；台北週日/週一早上不跑
+// （美股週末無新資料；週一早上預期=上週五，通常週六已補齊）。
+// dedup：KV 每 20 分鐘至多 dispatch 一次（key 含當日＋20 分時段桶），一晨最多 4 次——
+// 每次 dispatch 的 us.yml 自帶 2 輪×10 分重試，涵蓋整個入庫窗又不轟炸 Actions。
+export const US_CATCHUP_AFTER_MIN = 7 * 60;        // 台北 07:00（入庫窗前緣）
+export const US_CATCHUP_UNTIL_MIN = 8 * 60 + 5;    // 台北 08:05（inclusive；之後不再觸發）
+export const usCatchupKey = (dateISO, nowMin) =>
+  `${bkfiredKey(dateISO, "uscatchup")}:${Math.floor(nowMin / 20)}`;
+export async function runUsCatchup(env, tp, fetchFn = fetch, opts = {}) {
+  if (!env.GH_DISPATCH_TOKEN) return { name: "us-catchup", skipped: "no-token" };
+  const nowMin = tp.hour * 60 + tp.minute;
+  if (nowMin < US_CATCHUP_AFTER_MIN || nowMin > US_CATCHUP_UNTIL_MIN)
+    return { name: "us-catchup", waiting: "outside-07:00-08:05" };
+  if (tp.dow === 0 || tp.dow === 1) return { name: "us-catchup", skipped: "no-new-us-data-sun-mon" };
+  const key = usCatchupKey(tp.date, nowMin);
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "us-catchup", skipped: "deduped-20min" };
+  let obj = null;
+  try { obj = await fetchProduct(`${env.DATA_BASE}/us.json`, fetchFn); } catch { /* 抓不到＝不新鮮 */ }
+  const expected = lastExpectedUsTradingDate(tp.date);
+  const usDate = obj ? String(obj.date || "").slice(0, 10) : null;
+  if (usDate && usDate >= expected) return { name: "us-catchup", fresh: true, usDate };
+  if (opts.dry) return { name: "us-catchup", wouldDispatch: true, usDate, expected };
+  try {
+    await ghDispatchWithRetry(env, "taiwan-flow-live-v2", "us.yml", fetchFn, opts.sleepFn || sleep,
+      { rounds: "2" });
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, bkStateValue("fired", 1), { expirationTtl: BKFIRED_TTL });
+    console.log(`us-catchup: us.json(${usDate || "無檔"}) 未達預期美股交易日(${expected}) → dispatched us.yml rounds=2`);
+    await recordJob(env, tp, "us-catchup", "fired", `us=${usDate || "無檔"} exp=${expected}`);
+    return { name: "us-catchup", fired: true, usDate, expected };
+  } catch (e) {
+    // dispatch 失敗只 log＋記錄（KV 不寫 → 下一個 20 分桶自動重試；GH 備援 cron 06:10 仍在）
+    console.log("us-catchup dispatch:", e && e.message);
+    await recordJob(env, tp, "us-catchup", "error", String((e && e.message) || e));
+    return { name: "us-catchup", error: String((e && e.message) || e) };
+  }
+}
+
 // ---- 排程狀態軌跡 jobstat（2026-07-25 P1）----
 // 動機：排程決策原本只進 console.log，Worker 日誌不持久＝事後查不到「今天這班到底發生什麼」。
 // 只記**狀態轉換**（fired／fresh／produced／error），不記輪詢噪音（skip/waiting）——晚場班
@@ -1381,7 +1441,8 @@ export async function recordJob(env, tp, name, result, extra) {
 // 「有沒有人在看」的最後一道：不 dispatch、不補跑，只盤點當日該有的產物是否落地，缺就告警。
 // 涵蓋 recheck 管不到的範圍——① 達 BK_MAX_ATTEMPTS 上限後仍沒落地；② 哨兵事件驅動的
 // flows/postmkt、定點班 news、事件驅動 summary（這些班沒有 bkGate recheck）。
-// mode：date=日期欄前 10 碼為今日；genToday=generated_at 台北日為今日；exists=當日檔存在即可。
+// mode：date=日期欄前 10 碼為今日；genToday=generated_at 台北日為今日；exists=當日檔存在即可；
+//       usDate=us.json 資料日 ≥ 最近預期美股交易日（見 lastExpectedUsTradingDate）。
 export function healthTargets(env) {
   const V2 = env.DATA_BASE;
   const FLOWS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/latest.json";
@@ -1401,7 +1462,9 @@ export function healthTargets(env) {
     ],
     morn: [
       { name: "morning",    url: `${V2}/morning.json`,           field: "generated_at", mode: "genToday" },
-      { name: "us",         url: `${V2}/us.json`,                field: "generated_at", mode: "genToday" },
+      // us（2026-08-13 改 usDate）：資料日 ≥ 最近預期美股交易日才算落地（美國國定假日會誤報
+      // 一次 stale 告警，屬可接受誤差——與 gradeMarket 對台股假日同一套簡化立場）
+      { name: "us",         url: `${V2}/us.json`,                field: "date",         mode: "usDate" },
       { name: "summary-am", url: `${POSTMKT_BASE}/data/summary/{ymd}-am.json`,           field: null,           mode: "exists" },
     ],
   };
@@ -2358,20 +2421,27 @@ export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
     const candidates = brief ? [brief, ...built.cards] : built.cards;
     // AM 新鮮度守門（**不用**晚間 baseline gate——早上 baseline 必為昨日，套用必然全滅）：
     //   晨報卡 am-brief-1 → daily-brief-card.json 的 date 為台北今日；
-    //   morning2/3/4     → morning.json 的 generated_at 台北日為今日（morning 管線今晨跑過）。
+    //   morning2/3      → morning.json 的 generated_at 台北日為今日（morning 管線今晨跑過）；
+    //   美股速覽卡 news-morning-4（2026-08-13 改用自己的 gate）→ us.json 的 date 已達
+    //   最近預期美股交易日（≥ 恆等於 =：date 不可能超前預期日）。美國國定假日該卡會
+    //   當天缺席（date 停在前一交易日、gate 誤判 stale），屬可接受行為；其他卡不受影響。
     // 不新鮮的卡直接不進 payload；全部不新鮮 → 空卡清單＋date=null（Python 拒渲染）。
     const briefFresh = !!(src.dailyBrief && String(src.dailyBrief.date || "").slice(0, 10) === tp.date);
     const morningFresh = !!(src.morning && taipeiDayOf(src.morning.generated_at) === tp.date);
+    const usFresh = !!(src.us
+      && String(src.us.date || "").slice(0, 10) >= lastExpectedUsTradingDate(tp.date));
     const amCards = [];
     for (const c of candidates) {
       if (!FX_AM_CARDS.has(c.id)) continue;
-      if (c.id === FX_AM_LONGFORM_CARD ? !briefFresh : !morningFresh) continue;
+      const fresh = c.id === FX_AM_LONGFORM_CARD ? briefFresh
+        : c.id === "news-morning-4" ? usFresh : morningFresh;
+      if (!fresh) continue;
       try { assertCardAllowed(c); amCards.push(c); }
       catch (e) { console.log("cards/data(am) 過濾剔除:", c.id, e && e.message); }
     }
-    // date＝資料日（manifest 語意同晚間）：AM 各卡守門都要求「資料日＝台北今日」，
-    // 有卡必為今日——晨報新鮮取 dailyBrief.date（規格指定），只剩 morning 三卡時取 tp.date
-    // （morning gate 已保證其 generated_at 台北日＝今日，兩者恆等）。
+    // date＝資料日（manifest 語意同晚間）：晨報新鮮取 dailyBrief.date（規格指定），
+    // 否則取 tp.date——morning2/3 的 gate 保證 generated_at 台北日＝今日；us 卡的 gate
+    // 保證其為「今晨該有的最新美股資料」，兩者都屬今晨內容、tp.date 語意成立。
     const amDate = amCards.length
       ? (briefFresh ? String(src.dailyBrief.date).slice(0, 10) : tp.date) : null;
     return { date: amDate, slot, renderedFor: src.dateStr, cards: amCards };
@@ -3423,6 +3493,9 @@ export default {
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
         // 08:20–08:50 推播；runMorning 內部各步已 try/catch，絕不影響上面的 summary-am
         ctx.waitUntil(runMorning(env, tp).catch((e) => console.log("morning-cards:", e && e.message)));
+        // us 晨間補跑（2026-08-13）：同窗第三件事——台北 07:00-08:05 檢查 us.json 資料日，
+        // 未達預期即 dispatch us.yml（rounds=2）；獨立 waitUntil，失敗不影響前兩件
+        ctx.waitUntil(runUsCatchup(env, tp).catch((e) => console.log("us-catchup:", e && e.message)));
       }
       return;
     }

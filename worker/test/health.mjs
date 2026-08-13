@@ -33,9 +33,11 @@ const mkFetch = (freshNames, alerts = []) => async (u, init) => {
   const fresh = freshNames.includes(t.name);
   if (t.mode === "exists")
     return fresh ? { ok: true, status: 200, json: async () => ({ ok: 1 }) } : { ok: false, status: 404, json: async () => null };
-  const val = fresh
-    ? (t.mode === "genToday" ? "2026-07-20T21:00:00+08:00" : "2026-07-20")
-    : (t.mode === "genToday" ? "2026-07-17T21:00:00+08:00" : "2026-07-17");
+  // usDate（us 專用，2026-08-13）：TP=週一 → 預期美股交易日=上週五 07-17；stale 給 07-16
+  const val = t.mode === "usDate" ? (fresh ? "2026-07-17" : "2026-07-16")
+    : fresh
+      ? (t.mode === "genToday" ? "2026-07-20T21:00:00+08:00" : "2026-07-20")
+      : (t.mode === "genToday" ? "2026-07-17T21:00:00+08:00" : "2026-07-17");
   return { ok: true, status: 200, json: async () => ({ [t.field]: val }) };
 };
 
@@ -72,7 +74,14 @@ const mkFetch = (freshNames, alerts = []) => async (u, init) => {
   })());
   chk("mktbal 用 latest_date 欄", healthVerdict(byName.mktbal, { latest_date: today }, today).ok === true);
   chk("genToday 台北日今日 → ok", healthVerdict(byName.news, { generated_at: "2026-07-20T21:07:00+08:00" }, today).ok === true);
-  chk("genToday 跨日 UTC 正規化", healthVerdict(byName.us, { generated_at: "2026-07-19T23:30:00Z" }, today).ok === true);
+  chk("genToday 跨日 UTC 正規化", healthVerdict(byName.news, { generated_at: "2026-07-19T23:30:00Z" }, today).ok === true);
+  // us（2026-08-13 改 usDate）：週一預期=上週五 07-17，看資料日不看 generated_at
+  chk("usDate 資料日=預期（週一→上週五）→ ok",
+    healthVerdict(byName.us, { date: "2026-07-17", generated_at: "2026-07-18T07:00:00+08:00" }, today).ok === true);
+  chk("usDate 資料日落後（generated_at 今日也不算）→ 不 ok", (() => {
+    const v = healthVerdict(byName.us, { date: "2026-07-16", generated_at: "2026-07-20T05:10:00+08:00" }, today);
+    return v.ok === false && v.at === "2026-07-16";
+  })());
   chk("exists 有檔 → ok", healthVerdict(byName["summary-pm"], { any: 1 }, today).ok === true);
   chk("exists 無檔 → 不 ok、at=null", (() => {
     const v = healthVerdict(byName["summary-pm"], null, today);

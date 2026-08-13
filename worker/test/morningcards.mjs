@@ -85,11 +85,15 @@ const DAYSUMMARY = () => ({
   share_top: { n: "晶圓製造", share_pct: 19.1 },
   pts_top: { n: "運算設備", pts: 55.2 },
 });
-const US = () => ({
-  date: "2026-08-08", generated_at: `${TODAY}T05:10:00+08:00`,
+// us 卡 gate（2026-08-13）＝資料日達最近預期美股交易日：TODAY=週一 → 預期=上週五 2026-08-07
+const US = (o = {}) => ({
+  date: YDAY, generated_at: `${TODAY}T05:10:00+08:00`,
   brief: "美股收漲，科技股買盤最大。",
   groups: [{ g: "指數", rows: [{ n: "道瓊", chg: 0.5 }, { n: "那斯達克", chg: 1.1 }] }],
+  ...o,
 });
+// 資料日停在上週四（05:05 主班搆不到 FinMind 入庫窗的常態）＝不新鮮
+const US_STALE = () => US({ date: "2026-08-06", generated_at: `${TODAY}T05:10:00+08:00` });
 const SRC = (o = {}) => ({
   [URLS.dailyBrief]: o.brief === undefined ? BRIEF() : o.brief,
   [URLS.morning]: o.morning === undefined ? MORNING() : o.morning,
@@ -188,19 +192,42 @@ const FULL = (o = {}) => ({ ...SRC(o), [MF_URL]: o.manifest === undefined ? MANI
   chk("晨報缺檔 → 3 張、不炸", gone.cards.length === 3 && gone.date === TODAY);
 }
 {
-  // morning.json 不新鮮（generated_at 昨日）→ morning 三卡全擋、晨報照出
+  // morning.json 不新鮮（generated_at 昨日）→ morning2/3 擋、晨報照出；
+  // 2026-08-13 起 us 卡（news-morning-4）改用自己的 gate（us.date 達預期美股交易日），
+  // 不再被 morning generated_at 連坐——本例 us 新鮮 → 照出（原預期「只剩晨報卡」已過時）
   const out = await buildCardsData(ENV_BASE, TP_PUSH,
     mkFetch(SRC({ morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }) }), []), { slot: "am" });
-  chk("morning 非今晨 → 只剩晨報卡", out.cards.length === 1
-    && out.cards[0].id === FX_AM_LONGFORM_CARD, out.cards.map((c) => c.id).join(","));
+  chk("morning 非今晨 → 晨報＋us 卡（morning2/3 擋、us 不連坐）", out.cards.length === 2
+    && out.cards.some((c) => c.id === FX_AM_LONGFORM_CARD)
+    && out.cards.some((c) => c.id === "news-morning-4"), out.cards.map((c) => c.id).join(","));
   chk("morning 非今晨 → date=晨報 date", out.date === TODAY);
-  // 全部不新鮮 → 空卡清單＋date=null（Python 拒渲染）
+  // 全部不新鮮（含 us 資料日落後）→ 空卡清單＋date=null（Python 拒渲染）
   const none = await buildCardsData(ENV_BASE, TP_PUSH,
     mkFetch(SRC({ brief: BRIEF({ date: YDAY }),
-      morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }) }), []), { slot: "am" });
+      morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }), us: US_STALE() }), []), { slot: "am" });
   chk("全不新鮮 → 0 卡＋date=null", none.cards.length === 0 && none.date === null, JSON.stringify(none));
   // 守門用 generated_at 而非晚間 baseline gate：baseline 缺完全不影響 am
   chk("am 不依賴 baseline（源清單根本沒有它）", !("baseline" in URLS));
+}
+{
+  // us 卡 per-card gate（2026-08-13）：us.json 資料日未達預期 → 只擋 us 卡，其他卡不受牽連
+  const out = await buildCardsData(ENV_BASE, TP_PUSH, mkFetch(SRC({ us: US_STALE() }), []), { slot: "am" });
+  chk("us 資料日落後 → us 卡不出、其餘 3 張照出", out.cards.length === 3
+    && !out.cards.some((c) => c.id === "news-morning-4"), out.cards.map((c) => c.id).join(","));
+  chk("us 卡缺席 → date 仍今日（其他卡新鮮）", out.date === TODAY);
+  // generated_at 今日但 date 落後（us.yml 空轉情境）→ 一樣擋（gate 只看資料日）
+  const spin = await buildCardsData(ENV_BASE, TP_PUSH,
+    mkFetch(SRC({ us: US({ date: "2026-08-06", generated_at: `${TODAY}T07:50:00+08:00` }) }), []), { slot: "am" });
+  chk("us 空轉（generated_at 今日、date 落後）→ us 卡仍不出",
+    !spin.cards.some((c) => c.id === "news-morning-4"), spin.cards.map((c) => c.id).join(","));
+  // us 缺檔 → 只擋 us 卡（builder 對 null 源自然 skip，gate 也擋）
+  const gone = await buildCardsData(ENV_BASE, TP_PUSH, mkFetch(SRC({ us: null }), []), { slot: "am" });
+  chk("us 缺檔 → 3 張、不炸", gone.cards.length === 3
+    && !gone.cards.some((c) => c.id === "news-morning-4"));
+  // 美國國定假日情境（已知可接受）：date 停在前一交易日 → 該卡當天缺席，不影響其他卡
+  const holiday = await buildCardsData(ENV_BASE, TP_PUSH,
+    mkFetch(SRC({ us: US({ date: "2026-08-06" }) }), []), { slot: "am" });
+  chk("美國假日（date 停前一交易日）→ us 卡缺席、其餘照出", holiday.cards.length === 3);
 }
 {
   // pm 路徑不受影響：預設 slot 走既有 15 支源
@@ -291,10 +318,11 @@ const FULL = (o = {}) => ({ ...SRC(o), [MF_URL]: o.manifest === undefined ? MANI
     && !lineCalls(spy2)[0].body.messages.some((m) => m.type === "image"), JSON.stringify(out2));
 }
 {
-  // morning 三卡不新鮮、只剩晨報 → 只送 image message（無 carousel 也能推）
+  // morning2/3＋us 卡全不新鮮、只剩晨報 → 只送 image message（無 carousel 也能推）
+  // （2026-08-13 起 us 卡有自己的 gate，要一併壓成 stale 才是「只剩晨報」情境）
   const spy = [];
   const out = await pushMorningCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP_PUSH,
-    mkFetch(FULL({ morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }) }), spy));
+    mkFetch(FULL({ morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }), us: US_STALE() }), spy));
   chk("只剩晨報 → sent、0 carousel 卡", out.sent === true && out.cards === 0, JSON.stringify(out));
   const msgs = lineCalls(spy)[0].body.messages;
   chk("payload 只有一則 image", msgs.length === 1 && msgs[0].type === "image", JSON.stringify(msgs));
@@ -304,7 +332,7 @@ const FULL = (o = {}) => ({ ...SRC(o), [MF_URL]: o.manifest === undefined ? MANI
   const kv = fakeKV();
   const out = await pushMorningCards({ ...ENV_LINE, FLOW_KV: kv }, TP_PUSH,
     mkFetch(FULL({ brief: BRIEF({ date: YDAY }),
-      morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }) }), []));
+      morning: MORNING({ generated_at: `${YDAY}T06:47:00+08:00` }), us: US_STALE() }), []));
   chk("卡全不新鮮 → skipped no-cards＋KV skip-empty", out.skipped === "no-cards"
     && kv._m.get(DEDUP_KEY) === "skip-empty", JSON.stringify(out));
 }

@@ -209,6 +209,17 @@ def main():
            "generated_at": datetime.now(TPE).isoformat(),   # P4：統一台北 ISO(+08:00)
            "brief": brief(groups, us_date), "session": session_brief(us_date) if us_date else "",
            "groups": groups}
+    # generated_at 語意＝「最後一次資料內容有變的時間」（2026-08-13）：與現有檔比對
+    # （排除 generated_at），內容未變則保留原時戳——重試迴圈空轉時不再每輪污染
+    # generated_at，Worker 端「今天有沒有新資料」的判準因此可信
+    try:
+        old = json.loads(OUT.read_text(encoding="utf-8"))
+        def _strip(d):
+            return {k: v for k, v in d.items() if k != "generated_at"}
+        if _strip(old) == _strip(out) and old.get("generated_at"):
+            out["generated_at"] = old["generated_at"]
+    except (OSError, ValueError, AttributeError):
+        pass   # 現有檔缺／壞 → 照常寫新時戳
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     n = sum(len(g["rows"]) for g in groups)
     print(f"us.json: 美股日期 {us_date}, {n} 檔, USDTWD={out['fx']}")

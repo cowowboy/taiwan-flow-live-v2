@@ -43,7 +43,7 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 18 支 `.mjs`）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 20 支 `.mjs`）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`（12 支＝9 支排程
   builder（多為 Worker 主觸發的兜底備援）＋`canon.yml` 守 CLAUDE.md 頂端的 CANON 區塊
   ＋`pages.yml` 部署＋`backtest.yml`，後三支無 cron）
@@ -90,6 +90,12 @@
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
 - `health` 健檢班：台北 23:50、09:30，只盤點產物落地與否、不 dispatch
 - `summary-am` 窗（06:50–08:50）另掛晨場協調班 `export async function runMorning`（見下節）
+  ＋us 晨間補跑 `export async function runUsCatchup`（2026-08-13：台北 07:00–08:05 檢查
+  us.json 資料日是否達最近預期美股交易日（`export function lastExpectedUsTradingDate`，
+  台北二~六＝昨日、日/一＝上週五、美國假日不處理），未達即 dispatch `us.yml`
+  inputs.rounds=2；KV 20 分時段桶 dedup、週日/週一晨不跑、08:05 後不觸發。
+  動機：FinMind 美股常態 07:30–08:30 才入庫，05:05 主班 12 輪×10 分在 06:59 耗盡
+  搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））
 
 ## 晨間 LINE 圖卡（AM slot，2026-08-10）
 
@@ -110,9 +116,11 @@
   分目錄，開場清 *.png 互不誤刪）。渲染取卡走 `/cards/data?slot=am`
   （cf cache key 已把 slot 併進 path，am/pm 不互染）。
 - **新鮮度守門**在 `export async function buildCardsData`（slot=am）：晨報卡＝
-  brief.date 為台北今日；morning 三卡＝morning.json 的 generated_at 台北日為今日
-  （**不是**晚間的 baseline gate——早上 baseline 必為昨日）。全不新鮮 → 空卡＋date=null
-  → Python 拒渲染。
+  brief.date 為台北今日；morning2/3＝morning.json 的 generated_at 台北日為今日
+  （**不是**晚間的 baseline gate——早上 baseline 必為昨日）；美股速覽卡 news-morning-4
+  （2026-08-13 起 per-card gate）＝us.json 的 date 達最近預期美股交易日，不再被
+  morning generated_at 連坐（美國國定假日該卡當天缺席，屬可接受行為）。
+  全不新鮮 → 空卡＋date=null → Python 拒渲染。
 - 測試：`node test/morningcards.mjs`。
 
 ## /status 全系統資料健康端點（2026-08-11，新資料規範 schema:1 首例）
@@ -137,7 +145,7 @@
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 18 支要個別跑（離線、免 token）
+node test/sentinel.mjs              # 其餘 19 支要個別跑（離線、免 token）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 
