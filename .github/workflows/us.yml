@@ -89,7 +89,14 @@ jobs:
             done
             # push 最終失敗只記 log 不終止 run（bash -e 下 return 1 會殺整個 step），
             # 迴圈下一輪（10 分鐘後）重跑 build 再試——與「下一輪會再試」的行為一致
-            if [ "$pushed" != "1" ]; then echo "::warning::push failed after 5 retries（下一輪 10 分鐘後會再試）"; return 0; fi
+            if [ "$pushed" != "1" ]; then
+              # 全敗時退掉本地 commit（工作區產物保留）：否則下一輪 same_content 比到
+              # 「本地 HEAD」會誤判無新資料而跳過 commit+push，資料就永遠上不了 origin
+              # 且 run 以 success 收尾（驗收發現的殘餘缺口）
+              git reset --mixed origin/main || true
+              echo "::warning::push failed after 5 retries（已退掉本地 commit，下一輪 10 分鐘後重試）"
+              return 0
+            fi
             # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
             gh workflow run pages.yml --ref main || true
           }
