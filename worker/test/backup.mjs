@@ -200,14 +200,32 @@ const NOW = Date.UTC(2026, 6, 20, 12, 0, 0);   // 固定時鐘（opts.nowMs 注�
     mkFetch({ generated_at: "2026-07-18T07:49:58+08:00", date: "2026-07-17" }, 204, spy));
   chk("us 資料日達預期 → fresh:true", out.fresh === true && spy.length === 0);
 }
-// 6c) us recheck 情境（本次修法核心）：05:05 首發後 us.yml 空轉（generated_at 已是今日、
-//     date 沒推進）→ 05:35 recheck 仍判 stale、補發第 2 次（舊 genToday 判準在此永遠短路）
+// 6c) us recheck 於入庫窗前（05:35）：即使 stale 也靜默延後——FinMind 入庫窗 07:30-08:30，
+//     此時補發＋告警必然是噪音，交給 us-catchup／晨間健檢（2026-08-14 降噪修法）
+{
+  const spy = [];
+  const kv = fakeKV({ "bkfired:20260720:us": bkStateValue("fired", 1, NOW - 30 * 60e3) });
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, { ...TP, hour: 5, minute: 35 }, byName.us,
+    mkFetch({ generated_at: "2026-07-20T05:10:00+08:00", date: "2026-07-16" }, 204, spy), { nowMs: NOW });
+  chk("us recheck 入庫窗前 → 靜默延後、不 dispatch 不告警",
+    out.deferred === "before-us-ingest-window" && spy.length === 0, JSON.stringify(out));
+}
+// 6c2) us recheck 於入庫窗後（07:05，例如 recheck cron 被 GH 延遲推進窗內）→ 照常補發第 2 次
+{
+  const spy = [];
+  const kv = fakeKV({ "bkfired:20260720:us": bkStateValue("fired", 1, NOW - 30 * 60e3) });
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, { ...TP, hour: 7, minute: 5 }, byName.us,
+    mkFetch({ generated_at: "2026-07-20T05:10:00+08:00", date: "2026-07-16" }, 204, spy), { nowMs: NOW });
+  chk("us recheck 入庫窗內 → 補發第 2 次",
+    out.fired === true && out.attempt === 2, JSON.stringify(out));
+}
+// 6c3) us recheck、tp 缺 hour/minute（防呆）→ 保守放行走原路徑
 {
   const spy = [];
   const kv = fakeKV({ "bkfired:20260720:us": bkStateValue("fired", 1, NOW - 30 * 60e3) });
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, byName.us,
     mkFetch({ generated_at: "2026-07-20T05:10:00+08:00", date: "2026-07-16" }, 204, spy), { nowMs: NOW });
-  chk("us recheck：generated_at 今日但 date 未達預期 → 補發第 2 次",
+  chk("us recheck 缺時間欄位 → 保守放行補發",
     out.fired === true && out.attempt === 2, JSON.stringify(out));
 }
 // 7) dry 模式：非今日但只回決策、不真的 dispatch、KV 不記

@@ -999,6 +999,17 @@ export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
   const st = env.FLOW_KV ? parseBkState(await env.FLOW_KV.get(key)) : null;
   const gate = bkGate(st, now);           // 冪等＋冷卻＋次數上限
   if (gate.act === "skip") return { name: pipe.name, skipped: gate.why, attempts: gate.n };
+  // us（usDate 判準）：台北 07:00（入庫窗前緣）之前的 recheck 必然拿不到新資料——
+  // FinMind 美股收盤常態 07:30-08:30 才入庫，05:35 的補發＋告警只是每日固定噪音
+  // （2026-08-14 實例：每晨 05:35 都發「已補發第 2 次」告警）。改為入庫窗前靜默延後，
+  // 交給 07:00-08:05 的 us-catchup 與 09:30 晨間健檢接手；tp 時間欄位缺失時保守放行。
+  if (pipe.mode === "usDate" && gate.act === "recheck") {
+    const mins = tp.hour * 60 + tp.minute;
+    if (Number.isFinite(mins) && mins < US_CATCHUP_AFTER_MIN) {
+      if (!opts.dry) await recordJob(env, tp, pipe.name, "recheck-defer", "入庫窗未開，交給 us-catchup");
+      return { name: pipe.name, deferred: "before-us-ingest-window", attempts: gate.n };
+    }
+  }
   let obj = null, fetchErr = null;
   // {date} 佔位：intraday 產物按日命名（data/intraday/YYYY-MM-DD.json），代入今日；
   // 當日檔 404 → obj=null → 不新鮮 → 補發，語意與固定 URL 班一致
