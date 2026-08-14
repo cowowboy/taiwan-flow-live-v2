@@ -1,23 +1,23 @@
 {
- "date": "2026-08-13",
- "generated_at": "2026-08-13T23:11:01+08:00",
+ "date": "2026-08-14",
+ "generated_at": "2026-08-14T22:00:59+08:00",
  "images": {
-  "sig-sub-surge": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-sub-surge.png?d=2026-08-13",
-  "sig-dual-buy": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-dual-buy.png?d=2026-08-13",
-  "sig-exit-sell": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-exit-sell.png?d=2026-08-13",
-  "sig-surge-warn": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-surge-warn.png?d=2026-08-13",
-  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-13",
-  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-13",
-  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-13",
-  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-13",
-  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-13",
-  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-13",
-  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-13",
-  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1.png?d=2026-08-13"
+  "sig-sub-surge": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-sub-surge.png?d=2026-08-14",
+  "sig-dual-buy": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-dual-buy.png?d=2026-08-14",
+  "sig-exit-sell": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-exit-sell.png?d=2026-08-14",
+  "sig-surge-warn": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/sig-surge-warn.png?d=2026-08-14",
+  "v2-ov-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-1.png?d=2026-08-14",
+  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-08-14",
+  "flows-hdr-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-1.png?d=2026-08-14",
+  "flows-hdr-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-hdr-2.png?d=2026-08-14",
+  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-08-14",
+  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-08-14",
+  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-08-14",
+  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1.png?d=2026-08-14"
  },
  "ratios": {
-  "sig-sub-surge": "1024:838",
-  "sig-dual-buy": "1024:460",
+  "sig-sub-surge": "1024:555",
+  "sig-dual-buy": "1024:366",
   "sig-exit-sell": "1020:1024",
   "sig-surge-warn": "987:1024",
   "v2-ov-1": "1024:643",
@@ -27,9 +27,9 @@
   "flows-foreign-1": "861:1024",
   "flows-trust-1": "861:1024",
   "pm-aetf-5": "1024:539",
-  "pm-summary-1": "1040:5234"
+  "pm-summary-1": "1040:4590"
  },
  "previews": {
-  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1-preview.png?d=2026-08-13"
+  "pm-summary-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-summary-1-preview.png?d=2026-08-14"
  }
 }
