@@ -2,6 +2,7 @@
 
 > 寫於 2026-08-16（台北）。給接手的下一個 session——**你沒有前一段對話的脈絡，這份要能單獨讀懂**。
 > 範圍全部在 `taiwan-flow-live-v2`。動任何制度檔前先讀 `claude-harness/Harness/04-maintenance.md`。
+> 文中行號為 2026-08-16 當下（repo HEAD `c0b3581`）；檔案會長，對不上時以函式／關鍵字 grep 為準。
 
 ## 0. 一句話現況
 
@@ -45,7 +46,7 @@ FinMind 對 5 家投信的主動ETF 持股慢一個交易日，已對其中 2 �
 
 ## 3. 待辦 1：`primary` 口徑副作用（我引入的，建議優先修）
 
-`src/build_aetf_diff.py:200` —
+`src/build_aetf_diff.py:201`（在 `main()` 內）—
 
 ```python
 primary = max((d1 for (_, d1, _) in prepared.values()), default=None)
@@ -99,8 +100,8 @@ python3 tests/test_aetf_fallback.py   # 離線回歸測試
 
 現況調查結果：
 
-- 來源 UI 在 `postmkt/index.html:712-741`（`aetfCmpBlockHtml`）：最多 4 檔並排，每欄有代號／名稱／資料日，底下分新增／加碼／減碼／出清四類迷你表（個股、漲跌%、張數、市值億），選擇存 localStorage `pm_aetf_cmp`
-- 圖卡體系在本 repo：`worker/src/index.js` 的 `FX_CARD_BUILDERS` ＋ `FX_ACTIVE_CARDS`（`:1859`，目前 11 張白名單），規格在 `docs/line-cards-spec.md`
+- 來源 UI 在 `postmkt/index.html:714` 的 `aetfCmpBlockHtml()`：最多 4 檔並排，每欄有代號／名稱／資料日，底下分新增／加碼／減碼／出清四類迷你表（個股、漲跌%、張數、市值億），選擇存 localStorage `pm_aetf_cmp`
+- 圖卡體系在本 repo：`worker/src/index.js` 的 `FX_CARD_BUILDERS` ＋ `FX_ACTIVE_CARDS`（`worker/src/index.js:2232`，目前 11 張白名單），規格在 `docs/line-cards-spec.md`
 - **白名單裡已經有一張 `pm-aetf-5` 主動ETF進出個股**，新卡要跟它區隔清楚
 - **額度不是問題**：實測本帳號 `GET /v2/bot/message/quota` 回 `{"type":"limited","value":200}`，每月 200 則，目前用 22 則（11%），見 spec 第 1 節
 - **門檻是規格流程**：`docs/line-cards-spec.md` §3B 卡別分類（A 純描述／B 排行榜／C 訊號）與 §3C 內容裁剪（2026-07-30 才剛從 39 張裁到 11 張，使用者授權全權評選）。新增卡要走這個流程，且 §3B.3 的 C 類「回測前不得上線」
@@ -120,9 +121,9 @@ python3 tests/test_aetf_fallback.py   # 離線回歸測試
 |---|---|
 | `src/aetf_fallback.py` | 補位抓取器（本次新增） |
 | `src/build_aetf.py` | 每日快照；補位接在主迴圈後 |
-| `src/build_aetf_diff.py` | 跨日比對；`:200` primary、`:209` 誠實分組 |
+| `src/build_aetf_diff.py` | 跨日比對；`:201` primary、`:209` 誠實分組 |
 | `tests/test_aetf_fallback.py` | 日期折算回歸測試 |
 | `data/aetf/latest.json` | 含 `fallback_used`、`errors` |
 | `data/aetf/diff.json` | 含 `primary_date`、`laggards` |
 | `docs/line-cards-spec.md` | LINE 圖卡規格（待辦 4） |
-| `postmkt/index.html:712-741` | 比較 UI 原型（待辦 4 的內容來源） |
+| `postmkt/index.html:714` `aetfCmpBlockHtml()` | 比較 UI 原型（待辦 4 的內容來源） |
