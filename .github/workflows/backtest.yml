@@ -57,31 +57,62 @@ jobs:
       - name: 順序無關性（換 hash seed 重跑）
         run: PYTHONHASHSEED=7 python backtest/test_sorting_smoke.py
 
-      - name: 規格引用的報告行號仍指向對應結論行
+      # 2026-08-23：本步原本比對「規格引用的行號指向報告的 **結論** 行」，但 80869ade
+      # 與 8498bb1 已依「行號在這兩份檔案不可靠」的教訓把規格的引用全改成節名
+      # （M1/M3/M4/S1/S2/S3），守門的正規式沒跟著拆 → 抓到 0 列直接 bail，自 run #28
+      # 起長紅。改為驗節名：規格引用的節必須在報告中存在，且該節仍有腳本產出的結論行。
+      # 守的是同一件事（規格引用不得指空、結論行不得被手改掉），但不隨行號漂移。
+      - name: 規格引用的報告節仍存在且有結論行
         run: |
           python - <<'PY'
           import re, sys
 
-          spec = open('docs/line-cards-spec.md', encoding='utf-8').read()
+          spec = open('docs/line-cards-spec.md', encoding='utf-8').read().split('\n')
           report = open('backtest/report_sorting.md', encoding='utf-8').read().split('\n')
 
-          # 表格列：| N | 卡名 | … | `report_sorting.md:123` | 或 | `:123` … |
-          rows = re.findall(r'^\|\s*(\d)\s*\|([^|]+)\|.*?`(?:report_sorting\.md)?:(\d+)`[^|]*\|\s*$',
-                            spec, re.M)
+          # 只掃 §3.1 卡別清單那張表。2026-07-29（run #17）曾因正規式沒限縮而把 §9
+          # 的表格一起吃進來湊成 7 列誤判，這裡改用章節邊界隔開。
+          try:
+              start = next(i for i, l in enumerate(spec) if re.match(r'^#{1,6}\s+3\.1\s', l))
+          except StopIteration:
+              sys.exit('FAIL: docs/line-cards-spec.md 找不到「3.1 卡別清單」章節標題')
+          end = next((i for i in range(start + 1, len(spec)) if re.match(r'^#{1,6}\s', spec[i])),
+                     len(spec))
+          table = '\n'.join(spec[start:end])
+
+          # 表格列：| N | 卡名 | 篩選條件 | 排序 | 節名 |
+          rows = re.findall(r'^\|\s*(\d)\s*\|([^|]+)\|[^|]*\|[^|]*\|([^|]+)\|\s*$', table, re.M)
           if len(rows) != 6:
-              sys.exit(f'FAIL: 規格表格應有 6 張卡的行號引用，實際找到 {len(rows)}')
+              sys.exit(f'FAIL: §3.1 卡別清單應有 6 列，實際找到 {len(rows)}')
+
+          # 報告的一級節：「# S1. 跌破20日新低分層排序」→ key 'S1'，內容到下一個一級節為止
+          # （## / ### 是子節，仍算在同一節內）。
+          sections, cur = {}, None
+          for l in report:
+              h = re.match(r'^#\s+([A-Za-z0-9]+)\.', l)
+              if h:
+                  cur = h.group(1)
+                  sections[cur] = []
+              elif re.match(r'^#\s', l):
+                  cur = None
+              elif cur:
+                  sections[cur].append(l)
 
           bad = []
-          for num, name, ln in rows:
-              i = int(ln) - 1
-              if not (0 <= i < len(report)) or not report[i].startswith('**結論**'):
-                  got = report[i].strip()[:60] if 0 <= i < len(report) else '(超出檔案範圍)'
-                  bad.append(f'  卡{num} {name.strip()} → :{ln} 不是結論行，實際是「{got}」')
+          for num, name, ref in rows:
+              # 去掉 ⚠、空白、粗體等修飾，只留節代號
+              key = re.sub(r'[^A-Za-z0-9]', '', ref)
+              if key not in sections:
+                  bad.append(f'  卡{num} {name.strip()} → 引用「{ref.strip()}」不是報告的節'
+                             f'（報告現有節：{"／".join(sections)}）')
+              elif not any(l.startswith('**結論**') for l in sections[key]):
+                  bad.append(f'  卡{num} {name.strip()} → 節 {key} 沒有腳本產出的 **結論** 行')
 
           if bad:
-              sys.exit('FAIL: 規格引用的報告行號已失效（報告內容變動後未同步更新）\n'
-                       + '\n'.join(bad)
-                       + '\n修法：重新產生報告後，用 grep -n "^\\*\\*結論\\*\\*" '
-                         'backtest/report_sorting.md 取得新行號並更新規格表格。')
-          print(f'OK: 6 張卡的行號引用全部指向結論行')
+              sys.exit('FAIL: 規格引用的報告節已失效\n' + '\n'.join(bad)
+                       + '\n修法：對照 grep -n "^# " backtest/report_sorting.md 的節名'
+                         '更新規格 §3.1 表格末欄；結論行只能由 run_sorting.py 產生，'
+                         '不得手改。')
+          print('OK: 6 張卡引用的報告節都存在且各有結論行 → '
+                + '／'.join(re.sub(r'[^A-Za-z0-9]', '', r[2]) for r in rows))
           PY
