@@ -5,8 +5,11 @@
 #   TaiwanStockActiveETFHolding— 每日逐持股（component_stock_id/name/shares/weight/market_value）
 #   （申贖含總變動 TaiwanStockActiveETFHoldingChange 由 build_aetf_diff.py 另抓，見該檔）
 #
-# 納入條件：Info 中 category=='domestic' 且 type=='twse' 且代號 A 結尾（主動台股股票型，
-#   排除 foreign 美股型／D 結尾債券型／bfIncome 平衡入息型——它們不持台股、不適用主動加減碼）。
+# 納入條件（2026-08-29 放寬，原限 category=='domestic' 且 type=='twse'）：代號 A 結尾（股票型）
+#   且 category != 'foreign'（排除美股型；D 結尾債券型／bfIncome 平衡入息型非 A 結尾自然排除——
+#   它們不持台股、不適用主動加減碼）。不限上市/上櫃：tpex 台股型（如 00411A/00998A）在 Info 的
+#   category 為空字串，故不能以 category=='domestic' 篩。規則式動態取檔，新上市台股型自動入池。
+#   安全網：若未來有未標 category 的非台股型混入，grab_holding 因無台股持股會落 errors 自動排除。
 #   原追蹤 8 檔（00400A/00403A/00405A/00980A/00981A/00982A/00991A/00992A）全數涵蓋於此規則內。
 #
 # 快照格式（每檔）：{date, aum, units, stocks:{code:[股數, 名稱, 權重%]}, src_date, name, twse_aum_yi}
@@ -34,10 +37,11 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari
 TPE = timezone(timedelta(hours=8))
 STOCK_RE = re.compile(r"^\d{4,6}$")   # 台股普通股/ETF 代號（排除現金/期貨/外幣部位）
 
-# 若 Info 抓取失敗時的備援清單（原 8 檔＋已知擴充；平時走動態）
+# 若 Info 抓取失敗時的備援清單（2026-08-29 當日符合納入條件的 24 檔快照；平時走動態）
 FALLBACK_ETFS = ["00400A", "00401A", "00403A", "00404A", "00405A", "00406A", "00407A",
-                 "00408A", "00980A", "00981A", "00982A", "00984A", "00985A", "00987A",
-                 "00991A", "00992A", "00993A", "00994A", "00995A", "00996A", "00999A"]
+                 "00408A", "00410A", "00411A", "00980A", "00981A", "00982A", "00984A",
+                 "00985A", "00987A", "00991A", "00992A", "00993A", "00994A", "00995A",
+                 "00996A", "00998A", "00999A"]
 
 
 def fnum(v):
@@ -48,7 +52,7 @@ def fnum(v):
 
 
 def list_active_etfs() -> list[tuple[str, str]]:
-    """回 [(code, name)]：FinMind Info 中 domestic 主動台股股票型（type=twse、A 結尾）。
+    """回 [(code, name)]：FinMind Info 中主動台股股票型（A 結尾、非 foreign，不限上市/上櫃）。
     失敗時退回 FALLBACK_ETFS（名稱留空，後續由 Holding 補）。"""
     try:
         rows = fin.api_get("TaiwanStockActiveETFInfo", start_date=date.today().isoformat())
@@ -60,8 +64,7 @@ def list_active_etfs() -> list[tuple[str, str]]:
             latest[str(r.get("stock_id"))] = r   # 同代號後者覆蓋（取最新一列）
         out = []
         for code, r in sorted(latest.items()):
-            if (r.get("category") == "domestic" and r.get("type") == "twse"
-                    and code.endswith("A")):
+            if code.endswith("A") and r.get("category") != "foreign":
                 out.append((code, str(r.get("stock_name") or "")))
         if out:
             return out
