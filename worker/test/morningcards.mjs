@@ -4,7 +4,8 @@
 //       ② buildCardsData slot=am 新鮮度守門（晨報 date／morning generated_at，新鮮/不新鮮）
 //       ③ pushMorningCards 視窗/通道/dedup/manifest gate/推播組成/失敗重試
 //       ④ runMorning 接線（週末守門、渲染 dispatch 視窗與冪等、錯誤隔離）
-import { fxCardMorningBrief, FX_AM_CARDS, FX_AM_LONGFORM_CARD, fxLongformCard,
+import { fxCardMorningBrief, fxSplitQuote, FX_QUOTE_MAX,
+  FX_AM_CARDS, FX_AM_LONGFORM_CARD, fxLongformCard,
   FX_LONGFORM_CARD, DAILY_BRIEF_URL, buildCardsData, cardSourceUrls,
   pushMorningCards, runMorning, runCardsRenderAm, alertedKey, bkfiredKey,
   CARDS_AM_RENDER_AFTER_MIN, CARDS_AM_RENDER_UNTIL_MIN,
@@ -158,6 +159,43 @@ const FULL = (o = {}) => ({ ...SRC(o), [MF_URL]: o.manifest === undefined ? MANI
   chk("top3 非陣列／event 缺 what → 不炸、逐段容錯", badTop3.kind === "longform"
     && !JSON.stringify(badTop3.paras).includes("今日三件事")
     && !JSON.stringify(badTop3.paras).includes("本週關鍵事件"), JSON.stringify(badTop3.paras));
+}
+{
+  // ①b 「今日一句話」分句渲染＋防禦截斷（2026-08-29）
+  // 短 quote 依全形句讀分句：長句各自成段、連續短句（≤20 字）併同段
+  const multi = fxSplitQuote("短句一。短句二。這一句就明顯超過二十個字了所以不會被合併進前面的段落。短句三。");
+  chk("分句：長句自成段、連續短句併同段", multi.length === 3
+    && multi[0] === "短句一。短句二。" && multi[2] === "短句三。", JSON.stringify(multi));
+  chk("單一短句 → 單段原樣", JSON.stringify(fxSplitQuote("紀律比預測重要。")) === '["紀律比預測重要。"]');
+  // 分句結果進卡：每句在 paras 各佔一格（Python render_longform 逐 para 自帶段距）
+  const cMulti = fxCardMorningBrief({ dailyBrief: BRIEF({
+    quote: "第一句話帶足夠長度確保不會被併進其他段落喔。第二句話也帶足夠長度確保不會被併段喔。" }) });
+  const qi = cMulti.paras.indexOf("## 今日一句話");
+  chk("多句 quote → 段標後逐句成段", qi >= 0 && cMulti.paras.length === qi + 3
+    && cMulti.paras[qi + 1].startsWith("第一句話") && cMulti.paras[qi + 2].startsWith("第二句話"),
+    JSON.stringify(cMulti.paras.slice(qi)));
+  // 673 字實例（2026-08-29 真實 quote）：總長 > FX_QUOTE_MAX(360) → 截到最近句尾＋尾註
+  const LONG_QUOTE = "今天是週六台股休市，下一個交易日是8/31（一），而週一開盤要一口氣消化三件在台股收盤後才發生的事：Warsh首場Jackson Hole演說偏鷹，直言夏天的數據沒有告訴他底層趨勢有實質改善，9月升息機率從約35%跳到約57%；同一分鐘BLS的非農基準初步修正只下修7.9萬人，而市場原本預期上修18.3萬人，等於把「勞動市場其實很弱」這條反駁鷹派的材料整個抽走；再加上華爾街日報獨家報導NVIDIA暫停了AI營收分成計畫、原因是內部員工示警反壟斷風險，戳中市場最怕的AI循環融資敘事。結果全部反映在夜盤：台指期收45,900點、跌457點，對現貨是約431點逆價差，而日盤收盤時還是25.6點正價差。更麻煩的是8/31同時是MSCI季調生效日，利空開盤加上尾盤被動撮合壓在同一天。要說清楚的是，我上一期寫的台積電補漲邏輯已經削弱——ADR溢價從12.4%收斂到9.1%；匯率那兩個條件（升破31.60、成交量守住18億美元）也都沒完全達成。工作上今天到週一有四件：集保今天停機12小時、美好證券3億元次順位公司債被停止申報生效、耐特科技材料上市審議通過（但審議通過不等於核准掛牌）、金管會與印度IFSCA簽的是監理合作而非業務開放。家裡三件：試管嬰兒補助9/1起加碼5萬元，正在療程的千萬別在8/31前送資格審查申請；換過冷氣的翻發票，6個月內可退貨物稅每台最高2,000元但只有室外機算數；菲律賓宿霧遊學團爆登革熱、約100名團員來自17縣市，而8/31就是開學日，孩子去過東南亞的返國14天內只要發燒頭痛，就醫時主動說旅遊史那一句話最關鍵。";
+  chk("實例前提：673 字＞上限 360", [...LONG_QUOTE].length === 673 && FX_QUOTE_MAX === 360,
+    `${[...LONG_QUOTE].length}`);
+  const lp = fxSplitQuote(LONG_QUOTE);
+  const TAIL = "（全文見網頁版晨報）";
+  const kept = lp.reduce((a, x) => a + [...x].length, 0) - [...TAIL].length;
+  chk("673 字 → 多段＋截斷", lp.length > 1 && kept <= FX_QUOTE_MAX, `paras=${lp.length} kept=${kept}`);
+  chk("截斷處為句尾（尾註前一字是句讀）", "。；！？".includes([...lp[lp.length - 1].slice(0, -TAIL.length)].pop()),
+    lp[lp.length - 1].slice(-14));
+  chk("末段帶尾註", lp[lp.length - 1].endsWith(TAIL), lp[lp.length - 1].slice(-20));
+  chk("未截段落原文保留", lp[0].startsWith("今天是週六台股休市"), lp[0].slice(0, 20));
+  // 無句讀的超長字串（極端舊格式）→ 硬截＋刪節號＋尾註，不炸
+  const nopunc = fxSplitQuote("Ａ".repeat(400));
+  chk("無句讀超長 → 硬截 360＋…＋尾註", nopunc.length === 1
+    && nopunc[0] === "Ａ".repeat(360) + "…" + TAIL, `${nopunc[0].length}`);
+  // 容錯：空／空白／非字串 → 空陣列；進卡＝該段缺席、其餘照出
+  chk("空/空白/非字串 → 空陣列", fxSplitQuote("").length === 0 && fxSplitQuote("  ").length === 0
+    && fxSplitQuote(null).length === 0 && fxSplitQuote(42).length === 0 && fxSplitQuote().length === 0);
+  const cNoQ = fxCardMorningBrief({ dailyBrief: BRIEF({ quote: 42 }) });
+  chk("quote 非字串 → 該段缺席、整卡照組", cNoQ.kind === "longform"
+    && !JSON.stringify(cNoQ.paras).includes("今日一句話"), JSON.stringify(cNoQ.paras).slice(-80));
 }
 {
   chk("fxLongformCard slot 對照", fxLongformCard("am") === FX_AM_LONGFORM_CARD

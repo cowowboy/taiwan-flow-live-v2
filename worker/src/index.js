@@ -2343,6 +2343,49 @@ export const DAILY_BRIEF_URL =
 // 不放具體買賣點位／操作建議（網頁版晨報才有）；全文過 fxNeutralize 後仍受
 // assertCardAllowed 禁用字最後防線（與 pm-summary-1 同一套誠實原則守門）。
 // 新鮮度（date===台北今日）不在此判——builder 是無時鐘純函式，守門在 buildCardsData(am)。
+// 「今日一句話」分句（2026-08-29）：上游規範已改 quote ≤120 字、至多 3 句，但渲染端
+// 防禦舊格式與超標內容（曾出現 673 字整段糊成一塊）——依全形句讀切句、逐句自成段落
+// （render_longform 每個 para 自帶段距，Python 端零改動），連續短句（≤FX_QUOTE_SHORT 字）
+// 併同段避免過碎；總長 >FX_QUOTE_MAX 截到最近句尾＋末段尾註。非字串／空值回空陣列
+// （該段缺席、不整卡失敗，同其餘各段的逐段容錯立場）。
+export const FX_QUOTE_MAX = 360;   // 防禦上限（字）：總長超過即截斷到最近句尾
+const FX_QUOTE_SHORT = 20;         // 連續短句門檻（字）：前後兩句皆 ≤ 此值才併同段
+const FX_QUOTE_TAIL = "（全文見網頁版晨報）";
+export function fxSplitQuote(quote) {
+  if (typeof quote !== "string") return [];
+  const text = quote.trim();
+  if (!text) return [];
+  // 依全形句讀（。；！？）切句，標點留在句尾；全無句讀＝整段視為一句
+  const sents = (text.match(/[^。；！？]+[。；！？]*/g) || [])
+    .map((x) => x.trim()).filter(Boolean);
+  if (!sents.length) return [];
+  // 防禦截斷：總長超標 → 只留累計 ≤ 上限的完整句；連第一句都超標（無句讀長文）則硬截
+  const total = sents.reduce((a, x) => a + [...x].length, 0);
+  let kept = sents, truncated = false;
+  if (total > FX_QUOTE_MAX) {
+    truncated = true;
+    kept = [];
+    let acc = 0;
+    for (const x of sents) {
+      const len = [...x].length;
+      if (acc + len > FX_QUOTE_MAX) break;
+      kept.push(x);
+      acc += len;
+    }
+    if (!kept.length) kept = [[...sents[0]].slice(0, FX_QUOTE_MAX).join("") + "…"];
+  }
+  // 分段：每句一段；前後兩句皆為短句時併入同段
+  const paras = [];
+  let prevShort = false;
+  for (const x of kept) {
+    const short = [...x].length <= FX_QUOTE_SHORT;
+    if (short && prevShort && paras.length) paras[paras.length - 1] += x;
+    else paras.push(x);
+    prevShort = short;
+  }
+  if (truncated) paras[paras.length - 1] += FX_QUOTE_TAIL;
+  return paras;
+}
 export function fxCardMorningBrief(s) {
   const j = fxNeed(s.dailyBrief, "dailyBrief");
   const date = String(j.date || "").slice(0, 10);
@@ -2369,9 +2412,10 @@ export function fxCardMorningBrief(s) {
     paras.push("## 本週關鍵事件");
     for (const o of wk) paras.push(`${o.when ? `${o.when}：` : ""}${o.what}`);
   }
-  if (j.quote) {
+  const qparas = fxSplitQuote(j.quote);   // 分句渲染＋防禦截斷；非字串／空值＝該段缺席
+  if (qparas.length) {
     paras.push("## 今日一句話");
-    paras.push(String(j.quote));
+    paras.push(...qparas);
   }
   const body = paras.map((x) => fxNeutralize(x)).filter(Boolean);
   // 只剩段標＝四段內容全空 → skip（top3 空、positioning 空…逐段容錯，全空才整卡不出）
