@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   actions: write   # 提交後 dispatch pages 部署
+  issues: write
 
 concurrency:
   group: us
@@ -109,3 +110,14 @@ jobs:
             if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
             if [ $i -lt "$ROUNDS" ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/$ROUNDS"; sleep 600; fi
           done
+      # ⚠ 已知交互作用：本檔 concurrency group 為 us、cancel-in-progress: false，
+      # Worker 補跑班（runUsCatchup）撞上排程班時，後到者會在佇列被 GitHub 取消——
+      # 這屬正常行為、無資料損失（2026-08 共 6 次）。裝上 cancelled() 告警後，
+      # 這種正常排隊取消也會開 issue。目前刻意不排除，先觀察誤報頻率再決定是否收斂。
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-us

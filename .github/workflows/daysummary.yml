@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
   # 不 dispatch pages：daysummary 由 news 站走 raw.githubusercontent 讀，不需部署
 
 concurrency:
@@ -55,3 +56,10 @@ jobs:
             sleep 4
           done
           if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-daysummary

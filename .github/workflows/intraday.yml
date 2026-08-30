@@ -22,6 +22,7 @@ permissions:
   # fetch 慣例；行號會漂移故不引用，grep `data/classify.json` 可定位），
   # 沒 dispatch pages 就永遠停在舊版 → 需要 actions: write（2026-08-09 加）
   actions: write
+  issues: write
 
 concurrency:
   group: intraday
@@ -106,3 +107,10 @@ jobs:
           echo "::error::build_rrg_base.py 失敗，data/rrg_base.json 未更新"\
                "（data/intraday/ 歸檔已完成並 push，未受影響）"
           exit 1
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-intraday

@@ -9,6 +9,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  issues: write
 
 concurrency:
   # 連續 push 改「排隊」不取消：cancel-in-progress 會在 upload 後取消舊 run，
@@ -45,3 +46,13 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: pages-${{ github.run_id }}
+      # ⚠ 同 us.yml：concurrency group 為 pages、cancel-in-progress: false，
+      # 連續 push／dispatch 時佇列中較舊的 run 會被 GitHub 取消（正常行為），
+      # 會觸發本告警。
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-pages

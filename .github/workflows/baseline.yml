@@ -20,6 +20,7 @@ on:
 permissions:
   contents: write
   actions: write   # 提交後 dispatch pages 部署
+  issues: write
 
 concurrency:
   group: baseline
@@ -93,3 +94,10 @@ jobs:
           echo "::error::build_chain_daily.py 失敗，data/chain_daily/series.json 未更新"\
                "（baseline.json 已照常 commit + push，未受影響）"
           exit 1
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-baseline

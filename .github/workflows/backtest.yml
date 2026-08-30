@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   smoke:
@@ -116,3 +117,10 @@ jobs:
           print('OK: 6 張卡引用的報告節都存在且各有結論行 → '
                 + '／'.join(re.sub(r'[^A-Za-z0-9]', '', r[2]) for r in rows))
           PY
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-backtest
