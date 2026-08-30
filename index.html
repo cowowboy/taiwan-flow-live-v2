@@ -713,11 +713,12 @@ function insightGatherContext(){
 // 限制 thinking；原本 8000 在盤後分析那類大 context 上會被 thinking 吃光而回不出文字。
 // ---- 本次費用估算（三站逐字相同，改動需同步三站）----
 // 依 usage 與 model 估算本次「摘要分析」費用。定價＝Anthropic 第一方 API 每百萬 token 美元價
-// （來源：claude-api skill，快取日 2026-06-24）。Sonnet 5 於 2026-08-31 前有 intro 價 $2/$10，
-// 此處採標準價 $3/$15（保守、不低估；intro 到期即一致）。USD_TWD 為約略匯率、會浮動，僅供估算。
+// （來源：claude-api skill 定價表，快取日 2026-06-24：Opus 4.8 $5/$25、Sonnet 5 $2/$10，即該表
+// 所列現行價，非限時優惠；舊註記「Sonnet 5 intro 價 2026-08-31 到期後回 $3/$15」與該表不符，已移除）。
+// USD_TWD 為約略匯率、會浮動，僅供估算。
 const INSIGHT_PRICES = {            // [input, output] USD / 1M tokens
   "claude-opus-4-8": [5, 25],
-  "claude-sonnet-5": [3, 15],
+  "claude-sonnet-5": [2, 10],       // 2026-08-29 依官方現行價更正（原誤植 3/15）
 };
 const USD_TWD = 31.5;
 function insightCostText(usage, model){
