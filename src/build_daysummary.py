@@ -39,7 +39,7 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parent.parent
-WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
+from sites import WORKER  # 單一換址點,見 src/sites.py
 OUT_DIR = ROOT / "data" / "daysummary"
 TPE = timezone(timedelta(hours=8))
 HEADERS = {"User-Agent": "build-daysummary/1.0"}

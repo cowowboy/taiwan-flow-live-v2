@@ -42,10 +42,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
+from sites import WORKER as DEFAULT_WORKER, raw  # 單一換址點,見 src/sites.py
 # slot → 輸出子目錄（pm 沿用 latest 不改名；am 用自己的目錄，清 *.png 時互不誤刪）
 SLOT_DIRS = {"pm": "latest", "am": "am"}
-RAW_BASE_ROOT = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards"
+RAW_BASE_ROOT = raw("taiwan-flow-live-v2", "data/cards")
 RAW_BASE = f"{RAW_BASE_ROOT}/latest"          # pm 預設（向後相容）
 OUT_DIR = ROOT / "data" / "cards" / "latest"  # pm 預設（向後相容）
 FONT_DIR = ROOT / "fonts"

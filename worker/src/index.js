@@ -839,7 +839,15 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
 //   互不干擾（既有 frame/哨兵/news/morning 路由零改動）。
 // 跨 repo：mktbal/diag 在 postmkt repo——既有 GH_DISPATCH_TOKEN 已含 postmkt actions:write（見 wrangler.toml
 //   secret 註解與哨兵 postmkt dispatch），故跨 repo 補發沿用同一 token，無需額外授權。
-const POSTMKT_BASE = "https://raw.githubusercontent.com/shihpc/postmkt/main";
+// ── 單一換址點 ────────────────────────────────────────────────────────
+// 跨 repo 的 raw 位址全部由這裡衍生。換帳號或換託管(R2/自架/私有 repo+proxy)
+// 只改 RAW_ORG 一行;wrangler.toml 的 DATA_BASE 是本 repo 自己的 data 根,
+// 兩者的組織/主機必須一致(deploy 前用 npm test 的 consistency 檢查會提醒)。
+export const RAW_ORG = "https://raw.githubusercontent.com/shihpc";
+export const rawBase = (repo) => `${RAW_ORG}/${repo}/main`;
+export const raw = (repo, path) => `${rawBase(repo)}/${path}`;
+
+const POSTMKT_BASE = rawBase("postmkt");
 // 六條每日高價值班設定：
 //   mode "date"     → 產物 field（前 10 碼）=== 今日台北交易日；
 //   mode "genToday" → generated_at 的台北日 === 今日（判「今天有沒有跑過」；news 等用）；
@@ -1089,9 +1097,9 @@ export function summaryReady(slot, srcs, today) {
 // summary 上游產物 URL 表（flows/news 為跨 repo raw；morning 在本 repo DATA_BASE）
 export function summarySources(env) {
   return {
-    flows:   "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/latest.json",
+    flows:   raw("taiwan-flows", "data/latest.json"),
     postmkt: `${POSTMKT_BASE}/data/postmkt.json`,
-    news:    "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json",
+    news:    raw("taiwan-stock-news", "news.json"),
     morning: `${env.DATA_BASE}/morning.json`,
   };
 }
@@ -1459,8 +1467,8 @@ export async function recordJob(env, tp, name, result, extra) {
 //       usDate=us.json 資料日 ≥ 最近預期美股交易日（見 lastExpectedUsTradingDate）。
 export function healthTargets(env) {
   const V2 = env.DATA_BASE;
-  const FLOWS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/latest.json";
-  const NEWS = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
+  const FLOWS = raw("taiwan-flows", "data/latest.json");
+  const NEWS = raw("taiwan-stock-news", "news.json");
   return {
     eve: [
       { name: "daysummary", url: `${V2}/daysummary/latest.json`, field: "date",         mode: "date" },
@@ -2336,8 +2344,7 @@ export const FX_AM_CARDS = new Set([
 ]);
 // 長文卡 id 依 slot：pm 沿用 FX_LONGFORM_CARD（既有行為不變）、am＝晨報卡
 export const fxLongformCard = (slot) => (slot === "am" ? FX_AM_LONGFORM_CARD : FX_LONGFORM_CARD);
-export const DAILY_BRIEF_URL =
-  "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
+export const DAILY_BRIEF_URL = raw("taiwan-stock-news", "daily-brief-card.json");
 // 晨報長文卡：daily-brief-card.json → longform 卡。段落順序（使用者定案）：
 // 今日三件事 → 開盤前定位 → 本週關鍵事件 → 今日一句話；life 欄可缺可空（容錯，不入卡）。
 // 不放具體買賣點位／操作建議（網頁版晨報才有）；全文過 fxNeutralize 後仍受
@@ -2454,7 +2461,7 @@ export function buildDailyCards(src) {
 // 發送做成 runEvening 內「附加」的一步：程式端時間守門（台北 ≥22:30）＋KV 去重
 // `alerted:<date>:cards`（沿用 alertJob 的鍵型與 ALERTED_TTL）確保一晚只推一次。
 // 發送失敗不寫 KV → 下一輪（5 分後）自動重試，同 sentinel 慣例。
-const FLOWS_RAW_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main";
+const FLOWS_RAW_BASE = rawBase("taiwan-flows");
 export const CARDS_PUSH_AFTER_MIN = 22 * 60 + 30;   // 台北 22:30（規格 9.1.1 推播窗下緣）
 // 等 manifest 的截止時刻（2026-08-09）：到此仍非當日 manifest 就放棄等待、退純文字推出去。
 // 取 23:45 而非 23:55——晚場班 cron 到 23:55，留 23:45/23:50/23:55 三輪讓推播本身還有重試機會。
@@ -3536,9 +3543,9 @@ async function statusSiteLive(env, tp) {
 }
 // /status 主體：五站併發、單站失敗只染紅該站
 export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) {
-  const FLOWS_STATUS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/status.json";
-  const NEWS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
-  const BRIEF_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
+  const FLOWS_STATUS = raw("taiwan-flows", "data/status.json");
+  const NEWS_URL = raw("taiwan-stock-news", "news.json");
+  const BRIEF_URL = raw("taiwan-stock-news", "daily-brief-card.json");
   const POSTMKT_URL = `${POSTMKT_BASE}/data/postmkt.json`;
   const defs = [
     { id: "live", name: "即時類股動態", grade: "market", run: () => statusSiteLive(env, tp) },
