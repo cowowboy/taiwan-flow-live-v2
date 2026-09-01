@@ -2,8 +2,8 @@
 
 換帳號或換託管只改這裡;CI 上也可以用環境變數覆寫,不必改碼:
 
-    RAW_ORG=https://raw.githubusercontent.com/myorg
-    WORKER_BASE=https://taiwan-flow-v2.myacct.workers.dev
+    RAW_ORG=https://raw.githubusercontent.com/<你的帳號>
+    WORKER_BASE=https://taiwan-flow-v2.<你的帳號>.workers.dev
 
 本專案總共四個換址點,搬家時要一起動:
   1. src/sites.py            這裡(Python 管線)

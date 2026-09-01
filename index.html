@@ -175,7 +175,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 // ======== 設定 ========
 // V2：即時資料由 Cloudflare Worker 提供（FINMIND token 藏在 Worker，前端不碰、不需 PAT）。
 // 部署 Worker 後把網址填入 CFG.worker（結尾不要斜線），例：
-//   const CFG={worker:"https://taiwan-flow-v2.xxxx.workers.dev", autoSec:20};
+//   const CFG={worker:"https://taiwan-flow-v2.<你的帳號>.workers.dev", autoSec:20};
 // 留空時退化成讀靜態 data/live.json（只顯示最後一次快照，無即時）。
 // 單一換址點（前端）。換帳號或換託管只改這個物件；另外三個換址點見 src/sites.py 檔頭。
 const CFG={worker:"https://taiwan-flow-v2.shihpc.workers.dev",
