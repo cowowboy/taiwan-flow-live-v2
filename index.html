@@ -180,6 +180,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 // 單一換址點（前端）。換帳號或換託管只改這個物件；另外三個換址點見 src/sites.py 檔頭。
 const CFG={worker:"https://taiwan-flow-v2.shihpc.workers.dev",
            rawOrg:"https://raw.githubusercontent.com/shihpc",
+           hub:"https://shihpc.github.io",
            autoSec:20};   // autoSec：自動刷新間隔（秒）
 const RAW = (repo, path) => `${CFG.rawOrg}/${repo}/main/${path}`;
 const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
@@ -1531,7 +1532,7 @@ function ovRrgHtml(){
   ovRrgBaseLoad();
   // 盤後日頻版互連（規格 rrg-daily-spec-20260811 §4 第三階段完成定義第 6 條）：
   // 連結不依賴盤中資料，四條降級路徑（盤外／資料不足）也一律附上——降級時反而更該去看盤後版。
-  const dailyLink=`<div class="ovtfoot">看更長時間尺度的輪動 → <a href="https://shihpc.github.io/postmkt/" target="_blank" rel="noopener" style="color:var(--accent)">盤後日頻版</a>（postmkt 盤後分析站的「輪動雷達」tab）。兩者不是同一張圖：盤中版＝今日資金流（成交佔比 vs 自身 5 日基準，逐 10 分鐘）；盤後版＝跨週跨月的價格相對強弱（相對大盤，逐日）。</div>`;
+  const dailyLink=`<div class="ovtfoot">看更長時間尺度的輪動 → <a href="${CFG.hub}/postmkt/" target="_blank" rel="noopener" style="color:var(--accent)">盤後日頻版</a>（postmkt 盤後分析站的「輪動雷達」tab）。兩者不是同一張圖：盤中版＝今日資金流（成交佔比 vs 自身 5 日基準，逐 10 分鐘）；盤後版＝跨週跨月的價格相對強弱（相對大盤，逐日）。</div>`;
   // 降級①：基準表缺失／載入中（builder 另案產出，缺檔時只有本視角降級，其他視角不受影響）
   if(!OV_RRG_BASE){
     return (OV_RRG_BASE_ERR
