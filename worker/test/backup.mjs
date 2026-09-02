@@ -2,14 +2,15 @@
 // 執行：cd worker && node test/backup.mjs
 import { backupPipelines, backupPipelineForCron, BACKUP_CRONS, bkfiredKey,
   productFresh, runBackup, parseBkState, bkGate, bkStateValue, alertedKey,
-  BK_RECHECK_MS, BK_MAX_ATTEMPTS, HEALTH_CRONS, jobstatKey } from "../src/index.js";
+  BK_RECHECK_MS, BK_MAX_ATTEMPTS, HEALTH_CRONS, jobstatKey, RAW_ORG } from "../src/index.js";
+const OWNER = RAW_ORG.split("/").pop();   // 從 RAW_ORG 衍生,換帳號不必改測試
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
   if (ok) { pass++; } else { fail++; console.log(`  x ${name}  ${detail || ""}`); }
 }
 
-const ENV = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 const pipes = backupPipelines(ENV);
 const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
 
@@ -26,11 +27,11 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
   chk("intraday {date} 佔位＋tw 守門", byName.intraday.url.endsWith("/intraday/{date}.json") &&
     byName.intraday.wf === "intraday.yml" && byName.intraday.tw === true);
   chk("diag 跨 repo postmkt＋dep=postmkt.json", byName.diag.repo === "postmkt" && byName.diag.wf === "diag.yml" &&
-    byName.diag.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/diag/diag.json" &&
+    byName.diag.url === `${RAW_ORG}/postmkt/main/data/diag/diag.json` &&
     byName.diag.dep?.url.endsWith("/data/postmkt.json") && byName.diag.dep?.field === "date");
   chk("mktbal 跨 repo＋latest_date 欄＋dep=diag.json", byName.mktbal.repo === "postmkt" && byName.mktbal.wf === "mktbal.yml" &&
     byName.mktbal.field === "latest_date" &&
-    byName.mktbal.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/market_balance_history.json" &&
+    byName.mktbal.url === `${RAW_ORG}/postmkt/main/data/market_balance_history.json` &&
     byName.mktbal.dep?.url.endsWith("/data/diag/diag.json") && byName.mktbal.dep?.field === "date");
   chk("TW 班皆 tw:true", ["daysummary","aetf","baseline","intraday","diag","mktbal"].every((n) => byName[n].tw === true));
 }
@@ -164,7 +165,7 @@ const NOW = Date.UTC(2026, 6, 20, 12, 0, 0);   // 固定時鐘（opts.nowMs 注�
   const kv = TRADING_KV();
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, byName.baseline, mkFetch({ date: "2026-07-17" }, 204, spy));
   chk("產物非今日 → fired:true", out.fired === true);
-  chk("補發打對 workflow URL", spy.length === 1 && spy[0].includes("/shihpc/taiwan-flow-live-v2/actions/workflows/baseline.yml/dispatches"), spy[0]);
+  chk("補發打對 workflow URL", spy.length === 1 && spy[0].includes(`/${OWNER}/taiwan-flow-live-v2/actions/workflows/baseline.yml/dispatches`), spy[0]);
   const st5 = parseBkState(kv._m.get("bkfired:20260720:baseline"));
   chk("補發後 KV 記 fired 狀態＋次數 1＋時戳", st5.s === "fired" && st5.n === 1 && st5.ts > 0, JSON.stringify(st5));
   chk("首發不告警（第 2 次才告警）", out.attempt === 1 && kv._m.get(alertedKey("2026-07-20", "bk-recheck-baseline")) === undefined);
@@ -174,7 +175,7 @@ const NOW = Date.UTC(2026, 6, 20, 12, 0, 0);   // 固定時鐘（opts.nowMs 注�
   const spy = [];
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: TRADING_KV() }, TP, byName.diag, mkFetch({ date: "2026-07-17" }, 204, spy));
   chk("diag 跨 repo 補發打 postmkt/diag.yml",
-    out.fired === true && spy[0].includes("/shihpc/postmkt/actions/workflows/diag.yml/dispatches"), spy[0]);
+    out.fired === true && spy[0].includes(`/${OWNER}/postmkt/actions/workflows/diag.yml/dispatches`), spy[0]);
 }
 // 6) us（tw:false）：不看 series；資料日未達預期（週一預期=上週五 07-17、產物停在 07-16）
 //    → 補發（即使無 series 也不被守門擋）。generated_at 今日也救不了——usDate 只看資料日

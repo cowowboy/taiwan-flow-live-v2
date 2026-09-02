@@ -9,7 +9,7 @@ import { fxCardMorningBrief, fxSplitQuote, FX_QUOTE_MAX,
   FX_LONGFORM_CARD, DAILY_BRIEF_URL, buildCardsData, cardSourceUrls,
   pushMorningCards, runMorning, runCardsRenderAm, alertedKey, bkfiredKey,
   CARDS_AM_RENDER_AFTER_MIN, CARDS_AM_RENDER_UNTIL_MIN,
-  CARDS_AM_PUSH_AFTER_MIN, CARDS_AM_PUSH_UNTIL_MIN, jobstatKey } from "../src/index.js";
+  CARDS_AM_PUSH_AFTER_MIN, CARDS_AM_PUSH_UNTIL_MIN, jobstatKey, RAW_ORG } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -27,7 +27,7 @@ function fakeKV(init = {}) {
 }
 const TODAY = "2026-08-10";        // 週一
 const YDAY = "2026-08-07";         // 上週五（morning 三卡的資料日）
-const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV_BASE = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 const ENV_LINE = { ...ENV_BASE, LINE_TOKEN: "tk", LINE_USER_ID: "U1" };
 const URLS = cardSourceUrls(ENV_BASE, TODAY, "am");
 const MF_URL = `${ENV_BASE.DATA_BASE}/cards/am/manifest.json`;
@@ -102,7 +102,7 @@ const SRC = (o = {}) => ({
   [URLS.us]: o.us === undefined ? US() : o.us,
 });
 const AM_IMG = (id) =>
-  `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/${id}.png?d=${TODAY}`;
+  `${RAW_ORG}/taiwan-flow-live-v2/main/data/cards/am/${id}.png?d=${TODAY}`;
 const MANIFEST = (o = {}) => ({
   date: TODAY, generated_at: `${TODAY}T08:12:00+08:00`,
   images: {

@@ -2,14 +2,15 @@
 // 執行：cd worker && node test/summary.mjs
 import { ghDispatchRequest, dispatchRoleForCron, DISPATCH_ROLES, BACKUP_CRONS, FRAME_CRON,
   sumfiredKey, taipeiDayOf, newsFreshW, summaryReady, summarySources, runSummaryDispatch,
-  chainStep, runChain, runAetf2, runEvening, backupPipelines, bkfiredKey } from "../src/index.js";
+  chainStep, runChain, runAetf2, runEvening, backupPipelines, bkfiredKey, RAW_ORG } from "../src/index.js";
+const OWNER = RAW_ORG.split("/").pop();   // 從 RAW_ORG 衍生,換帳號不必改測試
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
   if (ok) { pass++; } else { fail++; console.log(`  x ${name}  ${detail || ""}`); }
 }
 
-const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV_BASE = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 
 // ---- ghDispatchRequest：inputs 向後相容 ----
 {
@@ -17,7 +18,7 @@ const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-f
   chk("無 inputs body 與舊版相同", old.init.body === JSON.stringify({ ref: "main" }), old.init.body);
   const withSlot = ghDispatchRequest("postmkt", "summary.yml", "T", { slot: "pm" });
   chk("有 inputs body 帶 slot", withSlot.init.body === JSON.stringify({ ref: "main", inputs: { slot: "pm" } }), withSlot.init.body);
-  chk("URL 指向 summary.yml", withSlot.url.includes("/shihpc/postmkt/actions/workflows/summary.yml/dispatches"));
+  chk("URL 指向 summary.yml", withSlot.url.includes(`/${OWNER}/postmkt/actions/workflows/summary.yml/dispatches`));
 }
 
 // ---- cron 路由：12 條 cron 唯一歸屬、互不衝突 ----
@@ -94,7 +95,7 @@ const mkFetch = (byUrl, spy = []) => async (u, init) => {
   const obj = byUrl[s];
   return { ok: obj != null, status: obj ? 200 : 404, json: async () => obj };
 };
-const SUM_URL = "https://raw.githubusercontent.com/shihpc/postmkt/main/data/summary/20260721-pm.json";
+const SUM_URL = `${RAW_ORG}/postmkt/main/data/summary/20260721-pm.json`;
 const READY_PM = {
   [S.flows]: { date: "2026-07-21" },
   [S.postmkt]: { date: "2026-07-21" },
@@ -234,7 +235,7 @@ const diag = pipes.find((p) => p.name === "diag");
   const dispatched = spy.filter((s) => s.url.includes("/dispatches")).map((s) => s.url);
   chk("evening: 恰 4 個 dispatch（summary/diag/aetf2/cards）", dispatched.length === 4, dispatched.join(" | "));
   chk("evening: cards.yml dispatch 對本 repo",
-    dispatched.some((u) => u.includes("/shihpc/taiwan-flow-live-v2/actions/workflows/cards.yml/")), dispatched.join(" | "));
+    dispatched.some((u) => u.includes(`/${OWNER}/taiwan-flow-live-v2/actions/workflows/cards.yml/`)), dispatched.join(" | "));
 }
 // runCardsRender：22:00 前不動作、冪等（同日第二次喚醒不重發）
 {

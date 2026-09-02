@@ -3,7 +3,7 @@
 // 守的規格：docs/line-cards-spec.md 第 2 節（Flex 硬限制）、第 4 節（誠實原則）、
 //           3B.3（C 類白名單）、第 6 節驗收條件。
 import { lineRequest, cardBubble, disclaimerBubble, buildCardCarousels,
-  cardsFallbackText, assertCardAllowed, FX_FORBIDDEN, FX_BLOCKED_CARDS, FX_COLORS } from "../src/index.js";
+  cardsFallbackText, assertCardAllowed, FX_FORBIDDEN, FX_BLOCKED_CARDS, FX_COLORS, RAW_ORG } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -45,7 +45,7 @@ const mkCard = (i) => ({
 
 // ---- cardBubble PNG hero 版（spec 3C：img 卡出 hero、body 精簡；缺圖走原版型）----
 {
-  const url = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/t-1.png?d=2026-07-28";
+  const url = `${RAW_ORG}/taiwan-flow-live-v2/main/data/cards/latest/t-1.png?d=2026-07-28`;
   const b = cardBubble({ ...mkCard(1), img: url, imgRatio: "1040:1216" });
   chk("img 卡有 hero image", b.hero && b.hero.type === "image" && b.hero.url === url);
   chk("hero size=full／aspectMode=cover", b.hero.size === "full" && b.hero.aspectMode === "cover");

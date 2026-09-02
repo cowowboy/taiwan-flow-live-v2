@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-from sites import WORKER as DEFAULT_WORKER, raw  # 單一換址點,見 src/sites.py
+from sites import RAW_ORG, WORKER as DEFAULT_WORKER, raw  # 單一換址點,見 src/sites.py
 # slot → 輸出子目錄（pm 沿用 latest 不改名；am 用自己的目錄，清 *.png 時互不誤刪）
 SLOT_DIRS = {"pm": "latest", "am": "am"}
 RAW_BASE_ROOT = raw("taiwan-flow-live-v2", "data/cards")
@@ -477,7 +477,7 @@ def render_card(card, F_B, F_R):
 # Cloudflare 的 bot protection 會依 User-Agent 簽章擋掉 urllib 預設的 `Python-urllib/3.x`
 # ——回 HTTP 403 ＋ body `error code: 1010`（2026-07-31 定案：cards.yml #1/#2 兩次排程
 # 全掛在此，curl 與空 UA 都放行，只有 Python-urllib 被擋）。務必帶明確 UA。
-_UA = "taiwan-flow-live-v2-cards/1.0 (+https://github.com/shihpc/taiwan-flow-live-v2)"
+_UA = f"taiwan-flow-live-v2-cards/1.0 (+{RAW_ORG.replace('raw.githubusercontent.com', 'github.com')}/taiwan-flow-live-v2)"
 
 
 def fetch_cards(worker_base: str, slot: str = "pm") -> dict:

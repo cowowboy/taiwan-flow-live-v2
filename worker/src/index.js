@@ -11,6 +11,14 @@
 //
 // 部署：cd worker && npx wrangler secret put FINMIND_TOKEN && npx wrangler deploy
 
+// ── 單一換址點 ────────────────────────────────────────────────────────
+// 跨 repo 的 raw 位址全部由這裡衍生。換帳號或換託管(R2/自架/私有 repo+proxy)
+// 只改 RAW_ORG 一行;wrangler.toml 的 DATA_BASE 是本 repo 自己的 data 根,
+// 兩者的組織/主機必須一致(deploy 前用 npm test 的 consistency 檢查會提醒)。
+export const RAW_ORG = "https://raw.githubusercontent.com/cowowboy";
+export const rawBase = (repo) => `${RAW_ORG}/${repo}/main`;
+export const raw = (repo, path) => `${rawBase(repo)}/${path}`;
+
 const FIN_BASE = "https://api.finmindtrade.com/api/v4/data";
 const FIN_SNAP = "https://api.finmindtrade.com/api/v4/taiwan_stock_tick_snapshot";
 const MKT = { twse: "tse", tpex: "otc" };          // classify.t → 市場 key
@@ -684,7 +692,10 @@ export async function attachFlowLast(env, live) {
 // 安全：env.GH_DISPATCH_TOKEN（wrangler secret，GitHub PAT 需 repo 的 actions:write）
 //   未設定時整段直接 return，不影響 worker 既有功能。
 
-const GH_OWNER = "shihpc";
+// 從 RAW_ORG 衍生,不另設一份。寫死的話換帳號時會漏——而且漏得很安靜:
+// dispatch 會打到原作者的 repo,你的 token 對那裡沒權限,整批 403,
+// 但 index.js:782 的「secret 未設就跳過」邏輯讓它看起來像沒設定。
+const GH_OWNER = RAW_ORG.split("/").pop();
 const SENTINEL_SIGNALS = [
   // 第一波：法人買賣超落地 → flows 主排行可算
   { name: "inst",     dataset: "TaiwanStockInstitutionalInvestorsBuySell", repo: "taiwan-flows", wf: "daily.yml" },
@@ -839,14 +850,6 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
 //   互不干擾（既有 frame/哨兵/news/morning 路由零改動）。
 // 跨 repo：mktbal/diag 在 postmkt repo——既有 GH_DISPATCH_TOKEN 已含 postmkt actions:write（見 wrangler.toml
 //   secret 註解與哨兵 postmkt dispatch），故跨 repo 補發沿用同一 token，無需額外授權。
-// ── 單一換址點 ────────────────────────────────────────────────────────
-// 跨 repo 的 raw 位址全部由這裡衍生。換帳號或換託管(R2/自架/私有 repo+proxy)
-// 只改 RAW_ORG 一行;wrangler.toml 的 DATA_BASE 是本 repo 自己的 data 根,
-// 兩者的組織/主機必須一致(deploy 前用 npm test 的 consistency 檢查會提醒)。
-export const RAW_ORG = "https://raw.githubusercontent.com/cowowboy";
-export const rawBase = (repo) => `${RAW_ORG}/${repo}/main`;
-export const raw = (repo, path) => `${rawBase(repo)}/${path}`;
-
 const POSTMKT_BASE = rawBase("postmkt");
 // 六條每日高價值班設定：
 //   mode "date"     → 產物 field（前 10 碼）=== 今日台北交易日；

@@ -65,19 +65,33 @@ def main() -> int:
     RAW_RE = r'https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+'
     WK_RE = r'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev'
     HUB_RE = r'https://[A-Za-z0-9-]+\.github\.io'
+    # 2026-09-02 補:第一次換址漏掉整整一類——不是 raw 網址但一樣綁帳號的地方。
+    # 最嚴重的是 worker 的 GH_OWNER(現已改成從 RAW_ORG 衍生),其次是 footer 的
+    # github.com 連結、api.github.com 呼叫、taiwan-flows 的 SITE.owner。
+    # 漏掉 GH_OWNER 的後果特別隱蔽:dispatch 會打到原作者的 repo 全部 403,
+    # 但程式的「secret 未設就跳過」邏輯讓它看起來像沒設定。
+    GH_RE = r'https://github\.com/[A-Za-z0-9_.-]+'
+    APIGH_RE = r'https://api\.github\.com/repos/[A-Za-z0-9_.-]+'
+    owner = a.raw_org.rstrip("/").split("/")[-1]
+    GH_NEW = f"https://github.com/{owner}"
+    APIGH_NEW = f"https://api.github.com/repos/{owner}"
+    OWNER_RE = r'owner:\s*"[A-Za-z0-9_.-]+"'
+    OWNER_NEW = f'owner: "{owner}"'
 
     total = 0
     print(f"目標: raw={a.raw_org}  worker={a.worker}  hub={a.hub}\n")
 
     print("[1] taiwan-flow-live-v2")
-    total += sub_file(ROOT / "worker/src/index.js", [(RAW_RE, a.raw_org)], a.dry_run)
-    total += sub_file(ROOT / "worker/wrangler.toml", [(RAW_RE, a.raw_org)], a.dry_run)
+    total += sub_file(ROOT / "worker/src/index.js", [(RAW_RE, a.raw_org), (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW)], a.dry_run)
+    total += sub_file(ROOT / "worker/wrangler.toml", [(RAW_RE, a.raw_org), (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW)], a.dry_run)
     total += sub_file(ROOT / "src/sites.py",
-                      [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub)], a.dry_run)
+                      [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub),
+                       (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW), (OWNER_RE, OWNER_NEW)], a.dry_run)
     total += sub_file(ROOT / "index.html",
-                      [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub)], a.dry_run)
+                      [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub),
+                       (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW), (OWNER_RE, OWNER_NEW)], a.dry_run)
 
-    for repo in ("postmkt", "taiwan-stock-news"):
+    for repo in ("postmkt", "taiwan-stock-news", "taiwan-flows"):
         d = SIBLINGS / repo
         if not d.is_dir():
             print(f"[!] 跳過 {repo}(不在 {SIBLINGS})")
@@ -86,10 +100,14 @@ def main() -> int:
         sites = d / "src/sites.py"
         if not sites.exists():
             sites = d / "sites.py"
-        total += sub_file(sites, [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub)], a.dry_run)
+        if sites.exists():   # taiwan-flows 沒有 sites.py——它不讀 raw 資料,只需要 owner
+            total += sub_file(sites, [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub),
+                              (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW), (OWNER_RE, OWNER_NEW)],
+                              a.dry_run)
         # index.html 同時涵蓋 SITE、CSP connect-src 白名單、回 Hub 靜態連結
         total += sub_file(d / "index.html",
-                          [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub)], a.dry_run)
+                          [(RAW_RE, a.raw_org), (WK_RE, a.worker), (HUB_RE, a.hub),
+                       (GH_RE, GH_NEW), (APIGH_RE, APIGH_NEW), (OWNER_RE, OWNER_NEW)], a.dry_run)
 
     print(f"\n合計 {total} 處{'(dry-run,未寫入)' if a.dry_run else ''}")
     if a.dry_run:

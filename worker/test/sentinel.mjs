@@ -1,8 +1,9 @@
 // FinMind 哨兵離線單元測試（無需 token、不打網路）
 // 執行：cd worker && node test/sentinel.mjs
 import { taipeiParts, scheduledRole, sentinelKey, signalLanded, ghDispatchRequest,
-  FRAME_CRON, dispatchNews, dispatchMorning }
+  FRAME_CRON, dispatchNews, dispatchMorning, RAW_ORG }
   from "../src/index.js";
+const OWNER = RAW_ORG.split("/").pop();   // 從 RAW_ORG 衍生,換帳號不必改測試
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -93,7 +94,7 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
 {
   const { url, init } = ghDispatchRequest("taiwan-flows", "daily.yml", "TOK123");
   chk("dispatch URL",
-    url === "https://api.github.com/repos/shihpc/taiwan-flows/actions/workflows/daily.yml/dispatches", url);
+    url === `https://api.github.com/repos/${OWNER}/taiwan-flows/actions/workflows/daily.yml/dispatches`, url);
   chk("dispatch method POST", init.method === "POST");
   chk("dispatch Authorization", init.headers["Authorization"] === "Bearer TOK123");
   chk("dispatch Accept", init.headers["Accept"] === "application/vnd.github+json");
@@ -101,7 +102,7 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
   chk("dispatch body ref=main", JSON.parse(init.body).ref === "main");
   const p = ghDispatchRequest("postmkt", "build.yml", "T");
   chk("dispatch postmkt URL",
-    p.url === "https://api.github.com/repos/shihpc/postmkt/actions/workflows/build.yml/dispatches", p.url);
+    p.url === `https://api.github.com/repos/${OWNER}/postmkt/actions/workflows/build.yml/dispatches`, p.url);
 }
 
 // ---- mock fetch：ghDispatch 走到 fetch 的實際參數（透過 request 建構函式間接驗，
@@ -129,7 +130,7 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
   const ok = await dispatchNews({ GH_DISPATCH_TOKEN: "TOK" }, mock204);
   chk("dispatchNews 有 token → 觸發", ok === true && calls.length === 1);
   chk("dispatchNews URL 正確", calls[0] && calls[0].url ===
-    "https://api.github.com/repos/shihpc/taiwan-stock-news/actions/workflows/build-news.yml/dispatches",
+    `https://api.github.com/repos/${OWNER}/taiwan-stock-news/actions/workflows/build-news.yml/dispatches`,
     calls[0] && calls[0].url);
   chk("dispatchNews method POST", calls[0].init.method === "POST");
   chk("dispatchNews Bearer", calls[0].init.headers["Authorization"] === "Bearer TOK");

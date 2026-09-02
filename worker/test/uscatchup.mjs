@@ -4,7 +4,7 @@
 //       ② runUsCatchup 時窗（07:00 前、08:05 後不觸發）、週日/週一守門、
 //          20 分 KV dedup、新鮮短路、dispatch 帶 inputs.rounds=2、失敗不寫 KV
 import { lastExpectedUsTradingDate, runUsCatchup, usCatchupKey,
-  US_CATCHUP_AFTER_MIN, US_CATCHUP_UNTIL_MIN, jobstatKey } from "../src/index.js";
+  US_CATCHUP_AFTER_MIN, US_CATCHUP_UNTIL_MIN, jobstatKey, RAW_ORG } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -39,7 +39,7 @@ function fakeKV(init = {}) {
     async put(k, v) { m.set(k, v); },
   };
 }
-const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV_BASE = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 const ENV = (kv) => ({ ...ENV_BASE, GH_DISPATCH_TOKEN: "T", FLOW_KV: kv });
 // mock fetch：/dispatches → 收 spy（含 body）；其餘視為 us.json（null 代表 404）
 const mkFetch = (usObj, spy = [], dispatchStatus = 204) => async (u, init) => {

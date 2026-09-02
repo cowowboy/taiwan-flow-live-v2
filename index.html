@@ -183,6 +183,9 @@ const CFG={worker:"https://taiwan-flow-v2.twradar.workers.dev",
            hub:"https://cowowboy.github.io",
            autoSec:20};   // autoSec：自動刷新間隔（秒）
 const RAW = (repo, path) => `${CFG.rawOrg}/${repo}/main/${path}`;
+// GitHub 帳號也從 rawOrg 衍生（api.github.com 與 github.com 連結共用）
+const OWNER = CFG.rawOrg.split("/").pop();
+const GHAPI = (repo, path) => `https://api.github.com/repos/${OWNER}/${repo}/${path}`;
 const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
 // 即時資料來源：有 Worker 走 Worker；本機開發走 /api/refresh（server.py 即時重算）；否則靜態檔
 const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
@@ -498,7 +501,7 @@ const b64DecodeUtf8 = s => { const bin = atob(String(s || "").replace(/\s+/g, ""
 async function ghSaveAnalysis(fileName, entry){
   const token = ghToken();
   if (!token) return { ok: false, err: "未設定 GitHub token" };
-  const api = "https://api.github.com/repos/shihpc/postmkt/contents/data/analyses/" + fileName;
+  const api = GHAPI("postmkt", "contents/data/analyses/") + fileName;
   const headers = { "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json" };
   const attempt = async () => {
     let sha = null, arr = [];
@@ -2514,7 +2517,7 @@ async function loadSiteVer(){
     let v = null;
     try{ v = JSON.parse(sessionStorage.getItem(KEY)); }catch(e){}
     if (!v || !v.sha){
-      const r = await fetch("https://api.github.com/repos/shihpc/taiwan-flow-live-v2/commits/main",
+      const r = await fetch(GHAPI("taiwan-flow-live-v2", "commits/main"),
                             { headers: { Accept: "application/vnd.github+json" } });
       if (!r.ok) return;
       const j = await r.json();

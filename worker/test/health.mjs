@@ -1,14 +1,15 @@
 // 日終/晨間健檢＋排程狀態軌跡 jobstat 離線單元測試（2026-07-25 P1）
 // 無需 token、不打真實網路——fetch 全用 mock。執行：cd worker && node test/health.mjs
 import { healthTargets, healthVerdict, healthUrl, runHealthCheck, HEALTH_CRONS,
-  dispatchRoleForCron, recordJob, jobstatKey, hhmm, JOBSTAT_MAX, alertedKey } from "../src/index.js";
+  dispatchRoleForCron, recordJob, jobstatKey, hhmm, JOBSTAT_MAX, alertedKey, RAW_ORG } from "../src/index.js";
+const OWNER = RAW_ORG.split("/").pop();   // 從 RAW_ORG 衍生,換帳號不必改測試
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
   if (ok) { pass++; } else { fail++; console.log(`  x ${name}  ${detail || ""}`); }
 }
 
-const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV_BASE = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 const TP = { date: "2026-07-20", dow: 1, hour: 23, minute: 50 };   // 台北週一 23:50（日終健檢時點）
 const T = healthTargets(ENV_BASE);
 const ALL = [...T.eve, ...T.morn];
@@ -50,9 +51,9 @@ const mkFetch = (freshNames, alerts = []) => async (u, init) => {
   chk("summary 兩場用 exists 模式（當日檔存在即可）",
     T.eve.find((t) => t.name === "summary-pm").mode === "exists" && T.morn.find((t) => t.name === "summary-am").mode === "exists");
   chk("跨 repo URL 正確（flows/postmkt/news 各自 raw）",
-    T.eve.find((t) => t.name === "flows").url.includes("/shihpc/taiwan-flows/") &&
-    T.eve.find((t) => t.name === "postmkt").url.includes("/shihpc/postmkt/") &&
-    T.eve.find((t) => t.name === "news").url.includes("/shihpc/taiwan-stock-news/"));
+    T.eve.find((t) => t.name === "flows").url.includes(`/${OWNER}/taiwan-flows/`) &&
+    T.eve.find((t) => t.name === "postmkt").url.includes(`/${OWNER}/postmkt/`) &&
+    T.eve.find((t) => t.name === "news").url.includes(`/${OWNER}/taiwan-stock-news/`));
 }
 
 // ---- URL 佔位代入 ----

@@ -4,7 +4,7 @@
 import { pushDailyCards, fetchCardSources, cardSourceUrls, CARDS_PUSH_AFTER_MIN,
   alertedKey, runEvening, buildCardsData, attachCardImages, FX_ACTIVE_CARDS,
   longformImage, FX_LONGFORM_CARD, FX_NEUTRALIZE, CARDS_WAIT_UNTIL_MIN,
-  jobstatKey } from "../src/index.js";
+  jobstatKey, RAW_ORG } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -27,7 +27,7 @@ const TP = { date: TODAY, hour: 22, minute: 30, dow: 2 };   // 台北週二 22:3
 // 2026-08-09 修正 B 之前，manifest 非當日在 22:30 就會直接推出去並寫死去重鍵。
 const TP_TAIL = { date: TODAY, hour: 23, minute: 45, dow: 2 };
 const TRADING_KV = (extra = {}) => fakeKV({ [`series:${TODAY}`]: [{ t: "09:00", amt: 1 }], ...extra });
-const ENV_BASE = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data" };
+const ENV_BASE = { DATA_BASE: `${RAW_ORG}/taiwan-flow-live-v2/main/data` };
 const WEBHOOK = "https://discord.example/api/webhooks/1/x";
 const ENV_LINE = { ...ENV_BASE, LINE_TOKEN: "tk", LINE_USER_ID: "U1" };
 const URLS = cardSourceUrls(ENV_BASE, TODAY);
@@ -67,7 +67,7 @@ function mkTotals(days = 22) {   // taiex 緩升 → 末日 > 20MA → bull；�
 // manifest fixture（原定義在第 ⑫ 節，2026-08-09 上移——FULL() 現在預設帶當日 manifest：
 // 修正 B 之後「manifest 當日」才是正常之夜的樣子，非當日會進入等待分支而不是照推）
 const IMG = (id, d = TODAY) =>
-  `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
+  `${RAW_ORG}/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
 const MANIFEST = (date = TODAY) => ({ date, generated_at: `${date}T22:14:00+08:00`,
   images: { "v2-ov-6": IMG("v2-ov-6", date), "v2-dash-1": IMG("v2-dash-1", date) },
   ratios: { "v2-ov-6": "1040:1216" } });
