@@ -73,7 +73,9 @@ head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "FLOW_KV"
-id = "71ed931c80b045fc80529c265e089f15"
+# 這個 id 綁定特定 Cloudflare 帳號,換帳號必須重建(wrangler kv namespace create FLOW_KV)。
+# 上游 shihpc 帳號用的是 71ed931c80b045fc80529c265e089f15,此處為本帳號自建。
+id = "e7355205c77446c4b6e731d0de027c0c"
 
 # 靜態依賴（classify.json / lastweek.json）來源：預設讀 V2 repo 的 raw；
 # repo 尚未 push 前可暫時指向 V1（classify 結構相同）：
