@@ -843,7 +843,7 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
 // 跨 repo 的 raw 位址全部由這裡衍生。換帳號或換託管(R2/自架/私有 repo+proxy)
 // 只改 RAW_ORG 一行;wrangler.toml 的 DATA_BASE 是本 repo 自己的 data 根,
 // 兩者的組織/主機必須一致(deploy 前用 npm test 的 consistency 檢查會提醒)。
-export const RAW_ORG = "https://raw.githubusercontent.com/shihpc";
+export const RAW_ORG = "https://raw.githubusercontent.com/cowowboy";
 export const rawBase = (repo) => `${RAW_ORG}/${repo}/main`;
 export const raw = (repo, path) => `${rawBase(repo)}/${path}`;
 

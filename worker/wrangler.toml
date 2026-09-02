@@ -79,11 +79,11 @@ id = "e7355205c77446c4b6e731d0de027c0c"
 
 # 靜態依賴（classify.json / lastweek.json）來源：預設讀 V2 repo 的 raw；
 # repo 尚未 push 前可暫時指向 V1（classify 結構相同）：
-#   https://raw.githubusercontent.com/shihpc/taiwan-flow-live/main/data
+#   https://raw.githubusercontent.com/cowowboy/taiwan-flow-live/main/data
 [vars]
 # 換址點之二(之一是 src/index.js 的 RAW_ORG)。TOML 沒有變數插值,兩者只能分開寫,
 # 但 test/consistency.mjs 會強制它們同源——忘記同步會在部署前就失敗,不會靜默半新半舊。
-DATA_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data"
+DATA_BASE = "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data"
 LIVE_TTL = "15"   # /live 聚合結果快取秒數
 
 # Secrets（不寫進檔）：
