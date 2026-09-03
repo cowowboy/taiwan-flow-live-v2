@@ -225,6 +225,22 @@ document.addEventListener("click",e=>{const th=e.target.closest("th[data-i]");if
     return typeof x==="number"&&typeof y==="number"?(x-y)*d:String(x).localeCompare(String(y),"zh-Hant")*d;});
   w.innerHTML=tinner(w.dataset.t);});
 
+// 下鑽展開後捲到位——但只在「這次真的換了展開對象」時才捲。
+// 2026-09-03 修（使用者回報「點輪動雷達/象限都會跳到下面」）：
+// 原本三處都是每次 render() 就捲，而 render() 會被輪動雷達的分頁/選取、象限的下鑽、
+// 視角 pill、以及 pull() 的 20 秒自動刷新全部觸發。只要先在下方表格展開過一個次產業，
+// state.sub[tab].open 就一直留著 → 之後在上方點任何東西（甚至什麼都不點，等 20 秒）
+// 都會被 smooth-scroll 拉到頁面最下面的下鑽區塊。
+// 記住「已經捲過哪個對象」，同一對象的重繪不再捲；換對象或重新展開才捲。
+const DD_SCROLLED={};
+function ddScroll(key,id,open){
+  if(!open){delete DD_SCROLLED[key];return;}
+  if(DD_SCROLLED[key]===open)return;
+  DD_SCROLLED[key]=open;
+  const dd=document.getElementById(id);
+  if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});
+}
+
 // ---- 點類股 / 次產業（delegated）----
 document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-sec]");if(!s)return;
   const v=decodeURIComponent(s.dataset.sec),cur=state.sub[state.tab].open;
@@ -472,7 +488,7 @@ function renderFlow(){
   main.innerHTML=html;
   if(open){const boxes=[...document.querySelectorAll("#main .scrollbox")];
     if(boxes.length>1)boxes.forEach((b,i)=>{if(i!==1)b.style.maxHeight="34vh"});
-    const dd=document.getElementById("dd");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
+    ddScroll(state.tab,"dd",open);}
 }
 document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-fsub]");if(!s)return;
   const st=state.sub[state.tab];if(!st)return;
@@ -2064,8 +2080,7 @@ function renderOverview(force){
   html+=renderOvTable();
   document.getElementById("main").innerHTML=html;
   ovQuadZoomInit();   // 象限視角時綁定 pinch/pan 縮放（#ovQuadZoom 不存在則 no-op）
-  const open=state.sub.ov.open;
-  if(open){const dd=document.getElementById("ddOv");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
+  ddScroll("ov","ddOv",state.sub.ov.open);
 }
 document.addEventListener("click",e=>{const b=e.target.closest("#ovExpand");if(!b)return;state.sub.ov.expandAll=!state.sub.ov.expandAll;render();});
 // 第三期：定調句旁「AI 深入解讀」→ 切到摘要分析 tab（render() 會同步 nav 高亮；不自動觸發分析）
@@ -2440,7 +2455,7 @@ function render(){
   document.getElementById("main").innerHTML=html;
   if(open){const boxes=[...document.querySelectorAll("#main .scrollbox")];
     if(boxes.length>1)boxes.slice(0,-1).forEach(b=>b.style.maxHeight="34vh");
-    const dd=document.getElementById("dd");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
+    ddScroll(state.tab,"dd",open);}
 }
 function chainSub(ind,indAgg){
   const opensub=state.sub.chain.opensub, agg={}, want=state.idx==="tse"?"twse":"tpex";
