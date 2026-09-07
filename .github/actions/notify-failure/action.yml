@@ -1,5 +1,5 @@
 name: notify-failure
-description: 失敗告警——同日同管線只開一張 issue、重複失敗改留言（避免 issue 洪水）；需 permissions issues:write
+description: 失敗告警——一律留 annotation 與 job summary；Issues 開著才另外開單（同日同管線只一張、重複失敗改留言）
 
 inputs:
   pipeline:
@@ -13,11 +13,32 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # 2026-09-07 修:原本只會開 Issue,而 fork 的 Issues 預設是關的
+      #(GitHub fork 一律 has_issues=false)。結果是:
+      #   1. 告警一次都發不出去——postmkt 的 summary 班從 fork 起就天天失敗、沒人知道
+      #   2. 這個 step 自己也 exit 1,把一次失敗變成兩個紅燈,真正的錯誤被推到日誌上方
+      # 現在 annotation 與 job summary 一律寫(不需要任何權限,失敗通知信與 Actions
+      # 頁面都看得到),開單改成「開得成就開、開不成只提醒一句」,絕不因此讓自己失敗。
       run: |
+        set -uo pipefail
         title="pipeline 失敗：${{ inputs.pipeline }} $(TZ=Asia/Taipei date +%F)"
-        n=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+        echo "::error title=${{ inputs.pipeline }} 失敗::$RUN_URL"
+        {
+          echo "## ❌ ${{ inputs.pipeline }} 失敗"
+          echo ""
+          echo "- 時間：$(TZ=Asia/Taipei date '+%F %H:%M') 台北"
+          echo "- run：$RUN_URL"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$(gh repo view --json hasIssuesEnabled -q .hasIssuesEnabled 2>/dev/null)" != "true" ]; then
+          echo "::warning::本 repo 未啟用 Issues，僅留 annotation。開啟後才會自動開單追蹤。"
+          exit 0
+        fi
+        n=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty' 2>/dev/null || true)
         if [ -n "$n" ]; then
-          gh issue comment "$n" --body "再次失敗：$RUN_URL"
+          gh issue comment "$n" --body "再次失敗：$RUN_URL" \
+            || echo "::warning::留言失敗（不影響告警，annotation 已留）"
         else
-          gh issue create --title "$title" --body "失敗 run：$RUN_URL"
+          gh issue create --title "$title" --body "失敗 run：$RUN_URL" \
+            || echo "::warning::開單失敗（不影響告警，annotation 已留）"
         fi
