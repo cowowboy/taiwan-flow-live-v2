@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 import json
-import re
 import statistics as st
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -55,16 +54,6 @@ SECTORS: list[tuple[str, list[str], bool]] = [
     ("光罩",         ["PLAB"], False),
 ]
 INDEXES = [("^SOX", "費城半導體"), ("^IXIC", "那斯達克")]
-
-
-def redact(e: object) -> str:
-    """錯誤訊息脫敏後才能印。
-
-    fin.api_get 把 token 放在 query string,而 requests 的 HTTPError 訊息會帶上
-    完整 URL——直接 print(e) 等於把 FinMind token 明文印進終端與 scrollback。
-    CI 裡 GitHub 會把 secret 遮成 ***,本機不會。
-    """
-    return re.sub(r"(token=)[^&\s]+", r"\1<redacted>", str(e))
 
 
 def fv(v):
@@ -112,7 +101,7 @@ def main() -> int:
         try:
             m = metrics(series(t))
         except Exception as e:                                # noqa: BLE001
-            print(f"  ! {t}: {redact(e)}", file=sys.stderr)
+            print(f"  ! {t}: {fin.redact(e)}", file=sys.stderr)
             m = None
         if m:
             M[t] = m
