@@ -110,6 +110,39 @@ jobs:
             if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
             if [ $i -lt "$ROUNDS" ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/$ROUNDS"; sleep 600; fi
           done
+      # 族群資金流向（給晨報用）。**刻意排在 us.json 迴圈之後、且不擋 run**：
+      # 理由是故障隔離：族群這支多打 52 次 FinMind（實測約 11 秒，不是耗時問題），
+      # 多一分失敗的機會就多一分風險，而 us.json 是晨報最依賴的資料。
+      # 這步失敗或逾時，上面的 us.json 已經 commit+push 完了，晨報照常產製只是少一個區塊。
+      - name: build us_sector_flow.json（族群流向，失敗不擋）
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          python src/build_us_sectors.py || exit 0
+          git add data/us_sector_flow.json
+          git diff --cached --quiet && { echo "族群內容未變，跳過"; exit 0; }
+          git commit -m "us sectors $(date -u +%FT%TZ)"
+          for k in 1 2 3; do
+            git pull --rebase origin main && git push && { gh workflow run pages.yml --ref main || true; exit 0; }
+            git rebase --abort || true
+            git fetch origin main || { sleep 4; continue; }
+            cp data/us_sector_flow.json /tmp/sec.mine
+            git reset --hard origin/main
+            cp /tmp/sec.mine data/us_sector_flow.json
+            git add data/us_sector_flow.json
+            git diff --cached --quiet && { echo "origin 已有相同內容"; exit 0; }
+            git commit -m "us sectors $(date -u +%FT%TZ)"
+            sleep 4
+          done
+          # 推不上去不算致命：晨報讀不到 sectors 就少一個區塊，us.json 不受影響
+          git reset --mixed origin/main || true
+          echo "::warning::us_sector_flow push 失敗，本日晨報將缺族群區塊"
+
       # ⚠ 已知交互作用：本檔 concurrency group 為 us、cancel-in-progress: false，
       # Worker 補跑班（runUsCatchup）撞上排程班時，後到者會在佇列被 GitHub 取消——
       # 這屬正常行為、無資料損失（2026-08 共 6 次）。裝上 cancelled() 告警後，
