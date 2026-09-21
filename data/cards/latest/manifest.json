@@ -1,6 +1,6 @@
 {
  "date": "2026-09-21",
- "generated_at": "2026-09-21T22:00:35+08:00",
+ "generated_at": "2026-09-22T03:23:00+08:00",
  "images": {
   "v2-ov-6": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-09-21",
   "v2-dash-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-09-21",
@@ -13,7 +13,7 @@
   "v2-dash-1": "808:1024",
   "flows-foreign-1": "861:1024",
   "flows-trust-1": "861:1024",
-  "pm-aetf-5": "861:1024"
+  "pm-aetf-5": "1024:460"
  },
  "previews": {}
 }
