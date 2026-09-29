@@ -1,15 +1,13 @@
 {
- "date": "2026-09-28",
- "generated_at": "2026-09-28T13:47:59+08:00",
+ "date": "2026-09-29",
+ "generated_at": "2026-09-29T08:10:51+08:00",
  "images": {
-  "news-morning-2": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/am/news-morning-2.png?d=2026-09-28",
-  "news-morning-3": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/am/news-morning-3.png?d=2026-09-28",
-  "news-morning-4": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/am/news-morning-4.png?d=2026-09-28"
+  "news-morning-2": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/am/news-morning-2.png?d=2026-09-29",
+  "news-morning-3": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/am/news-morning-3.png?d=2026-09-29"
  },
  "ratios": {
-  "news-morning-2": "1024:955",
-  "news-morning-3": "1024:553",
-  "news-morning-4": "1024:730"
+  "news-morning-2": "1024:789",
+  "news-morning-3": "1024:553"
  },
  "previews": {}
 }
