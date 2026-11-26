@@ -1,12 +1,12 @@
 {
- "date": "2026-11-25",
- "generated_at": "2026-11-26T16:51:00+08:00",
+ "date": "2026-11-26",
+ "generated_at": "2026-11-27T06:57:14+08:00",
  "images": {
-  "v2-ov-6": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-11-25",
-  "v2-dash-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-11-25",
-  "flows-foreign-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-11-25",
-  "flows-trust-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-11-25",
-  "pm-aetf-5": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-11-25"
+  "v2-ov-6": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-11-26",
+  "v2-dash-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-11-26",
+  "flows-foreign-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-11-26",
+  "flows-trust-1": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-11-26",
+  "pm-aetf-5": "https://raw.githubusercontent.com/cowowboy/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-11-26"
  },
  "ratios": {
   "v2-ov-6": "987:1024",
